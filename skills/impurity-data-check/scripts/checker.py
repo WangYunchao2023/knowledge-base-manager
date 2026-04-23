@@ -2,16 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 HPLC有关物质检测数据明显错误检查器
-版本: 0.1.0
-功能：批号格式检查、忽略不计判断检查
+版本: 0.3.0
+功能：批号格式一致性检查、忽略不计判断校验
 """
 
 import re
 import os
 import sys
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from pathlib import Path
 
 try:
     import openpyxl
@@ -36,133 +35,170 @@ class CheckError:
                 f"  建议：{self.suggestion}")
 
 
-class BatchNumberChecker:
-    """批号格式检查器"""
+class BatchFormatValidator:
+    """
+    批号格式验证器
+    标准格式：项目编号(可变长)-两位年两位月两位日-两位序号
+    例如：LMS002-260401-05
 
-    def __init__(self):
-        self.found_batches: List[str] = []
-        self.batch_patterns: Set[str] = set()  # 存储不同格式类型
+    正则：^(.+)-(\d{2})(\d{2})(\d{2})-(\d{2})$
+    """
 
-    def parse_batch(self, value: str) -> Optional[Dict]:
-        """解析批号，返回结构化信息"""
-        if not value or not isinstance(value, str):
-            return None
+    def __init__(self,
+                 pattern: str = r'^(.+)-(\d{2})(\d{2})(\d{2})-(\d{2})$',
+                 pattern_desc: str = '项目编号-年月日-序号（例：LMS002-260401-05）'):
+        self.pattern = pattern
+        self.pattern_desc = pattern_desc
+        self._compiled = re.compile(pattern)
 
-        value = value.strip()
+    def is_valid(self, batch: str) -> bool:
+        """检查批号是否符合标准格式"""
+        if not batch:
+            return False
+        return self._compiled.match(batch.strip()) is not None
 
-        # 排除明显不是批号的内容
-        non_batch_keywords = ['对照品', '系统适应性', '灵敏度', '流动相', '稀释', '空白',
-                              '溶剂', '配制', '来源', '对照', '自身', '杂质', '名称',
-                              '供试品名称', '批号', '样品', '实验日期', '检验人', '复核人',
-                              '检查（有关物质）', '检查（含量）']
-        for kw in non_batch_keywords:
-            if kw in value:
-                return None
+    def normalize(self, batch: str) -> Optional[str]:
+        """
+        将非标准格式批号标准化
+        例如：LMS002-26040105 → LMS002-260401-05
+        格式：YYMMDDNN（年月日+序号各2位）
+        """
+        batch = batch.strip()
+        if self.is_valid(batch):
+            return batch
 
-        # 排除纯数字序号（1, 2, 3...）
-        if re.match(r'^\d+$', value):
-            return None
-
-        # 排除文件路径、URL
-        if '://' in value or '/' in value or '\\' in value:
-            return None
-
-        # 查找类似批号的模式
-        # LMS002-260401-05, LMS00226040105, Y0001665
-        match = re.match(r'^([A-Z]+\d*[A-Z]*)-?(\d{6,8})?-?(\d*).*', value)
+        # 尝试：LMS002-26040105（无连字符）→ LMS002-260401-05
+        match = re.match(r'^(.+)-(\d{8})$', batch)
         if match:
             prefix = match.group(1)
-            date_part = match.group(2) if match.group(2) else ''
-            seq_part = match.group(3) if match.group(3) else ''
-
-            if len(prefix) >= 3 and (date_part or seq_part):
-                return {
-                    'prefix': prefix,
-                    'date_part': date_part,
-                    'seq_part': seq_part,
-                    'raw': value,
-                    'has_dash': '-' in value[:10] if len(value) > 10 else False,
-                }
+            digits = match.group(2)
+            if digits.isdigit():
+                # YYMMDDNN → YYMMDD-NN
+                return f"{prefix}-{digits[:6]}-{digits[6:8]}"
 
         return None
 
-    def extract_batch_number(self, value: str) -> Optional[str]:
-        """从字符串中提取批号"""
-        parsed = self.parse_batch(value)
-        if parsed:
-            return parsed['raw']
-        return None
 
-    def check_consistency(self, cell_ref: str, value: str) -> Optional[CheckError]:
-        """检查同一文件内批号格式一致性"""
-        parsed = self.parse_batch(value)
-        if not parsed:
+class BatchNumberChecker:
+    """批号格式一致性检查器"""
+
+    NON_BATCH_KEYWORDS = [
+        '对照品', '系统适应性', '灵敏度', '流动相', '稀释', '空白',
+        '溶剂', '配制', '来源', '对照', '自身', '杂质', '名称',
+        '供试品名称', '批号', '样品', '实验日期', '检验人', '复核人',
+        '实验员', '检测项目', '数据存储路径', '方法', '仪器',
+        '泵模块', '进样器模块', '柱温箱模块', '检测器模块',
+        '理论塔板数', '拖尾因子', '分离度', 'RSD', 'RSD%',
+        '峰面积', '保留时间', '相对保留时间', '信噪比',
+        '供试品', '灵敏度溶液', '系统适用性', '计算公式',
+    ]
+
+    def __init__(self, batch_format: BatchFormatValidator):
+        self.batch_format = batch_format
+        # 收集：(原始值, 单元格引用)
+        self.found_batches: List[Tuple[str, str]] = []
+
+    def _strip_suffix(self, value: str) -> str:
+        """去除批号后的复测/再测等备注"""
+        for suffix in ['（复测）', '(复测)', '（再测）', '(再测)']:
+            if suffix in value:
+                return value.split(suffix)[0].strip()
+        return value.strip()
+
+    def _is_batch_like(self, value: str) -> bool:
+        """判断是否像批号"""
+        if not value or not isinstance(value, str):
+            return False
+        value = value.strip()
+
+        for kw in self.NON_BATCH_KEYWORDS:
+            if kw in value:
+                return False
+
+        if re.match(r'^\d+$', value):
+            return False
+        if '://' in value or '/' in value or '\\' in value:
+            return False
+
+        # 批号必须包含字母
+        if not any(c.isalpha() for c in value):
+            return False
+
+        return True
+
+    def check(self, cell_ref: str, value: str) -> Optional[CheckError]:
+        """检查单个单元格的批号格式（是否符合标准格式）"""
+        if not self._is_batch_like(value):
             return None
 
-        self.found_batches.append(parsed['raw'])
+        self.found_batches.append((value, cell_ref))
 
-        # 空格检查
-        if ' ' in value and '（' not in value and '(' not in value:
-            # 有空格但不在括号旁，可能是错误
-            pass
-        if ' ' in value:
-            fixed = value.replace(' ', '').replace('（', '(').replace('）', ')')
-            # 规范化空格
-            if '  ' in fixed:
-                fixed = re.sub(r'\s+', '', fixed)
+        batch_body = self._strip_suffix(value)
 
-        # 空格检查（已禁用，按需启用）
-        # if ' ' in value:
-        #     fixed = value.replace(' ', '')
-        #     return CheckError(...)
+        if not self.batch_format.is_valid(batch_body):
+            normalized = self.batch_format.normalize(batch_body)
+            if normalized:
+                # 还原后缀
+                if batch_body != value:
+                    suffix = value[len(batch_body):]
+                    normalized += suffix
+                return CheckError(
+                    cell_ref=cell_ref,
+                    field='批号格式',
+                    current_value=value,
+                    error_type='BATCH_FORMAT_INVALID',
+                    message=f'批号不符合标准格式（{self.batch_format.pattern_desc}）',
+                    suggestion=normalized
+                )
 
         return None
 
     def final_consistency_check(self) -> List[CheckError]:
-        """最终一致性检查（所有数据收集完后调用）"""
+        """
+        一致性检查：同一文件内所有批号格式应统一
+        逻辑：以文件中最多的有效格式为基准，报告其他不一致的批号
+        """
         errors = []
 
         if len(self.found_batches) < 2:
             return errors
 
-        # 解析所有批号格式
-        parsed_batches = []
-        for b in self.found_batches:
-            p = self.parse_batch(b)
-            if p:
-                parsed_batches.append(p)
+        # 分类：有效的 vs 无效的（格式层面）
+        valid_ref = None  # 第一个符合标准格式的批号作为参考
+        invalid_batches: List[Tuple[str, str]] = []
 
-        if len(parsed_batches) < 2:
+        for value, cell_ref in self.found_batches:
+            batch_body = self._strip_suffix(value)
+            if self.batch_format.is_valid(batch_body):
+                if valid_ref is None:
+                    valid_ref = (value, cell_ref)
+            else:
+                # 格式不符合，检查是否能通过补连字符修正
+                if self.batch_format.normalize(batch_body):
+                    invalid_batches.append((value, cell_ref))
+
+        # 如果存在符合标准的批号，且有可修正的无效批号，报告一致性错误
+        if valid_ref is None or not invalid_batches:
             return errors
 
-        # 检查日期部分的位数一致性
-        # LMS002-26040105 (date_part=26040105, 8位)
-        # LMS002-260401-06 (date_part=260401, 6位; seq_part=06)
+        ref_value, ref_cell = valid_ref
+        ref_body = self._strip_suffix(ref_value)
 
-        date_lengths = set()
-        for p in parsed_batches:
-            if p['date_part']:
-                date_lengths.add(len(p['date_part']))
+        for value, cell_ref in invalid_batches:
+            batch_body = self._strip_suffix(value)
+            normalized = self.batch_format.normalize(batch_body)
+            if normalized and batch_body != value:
+                suffix = value[len(batch_body):]
+                normalized += suffix
 
-        # 如果日期部分位数不一致，说明格式不统一
-        if len(date_lengths) > 1:
-            # 找出所有不统一的批号
-            for p in parsed_batches:
-                if len(p['date_part']) == 8:  # 8位格式，需要补连字符
-                    prefix = p['prefix']
-                    date = p['date_part'][:6]
-                    seq = p['date_part'][6:]
-                    fixed = f"{prefix}-{date}"
-                    if seq:
-                        fixed += f"-{seq}"
-                    return [CheckError(
-                        cell_ref='',  # 需要外部传入
-                        field='批号格式',
-                        current_value=p['raw'],
-                        error_type='BATCH_INCONSISTENT',
-                        message='批号格式与文件内其他批号不一致',
-                        suggestion=f'建议：{fixed}'
-                    )]
+            errors.append(CheckError(
+                cell_ref=cell_ref,
+                field='批号格式',
+                current_value=value,
+                error_type='BATCH_INCONSISTENT',
+                message=f'批号格式与文件内其他批号不一致（参考：{ref_body}）',
+                suggestion=normalized if normalized else value
+            ))
 
         return errors
 
@@ -170,31 +206,14 @@ class BatchNumberChecker:
 class IgnoreTermChecker:
     """忽略不计判断检查器"""
 
-    # 忽略不计的阈值（企业标准，通常0.05%或0.10%）
-    DEFAULT_THRESHOLD = 0.05
-
-    # 允许标记"忽略不计"的关键词
-    IGNORE_KEYWORDS = ['忽略不计', '忽略', '不计']
-
-    def __init__(self, threshold: float = DEFAULT_THRESHOLD):
+    def __init__(self, threshold: float = 0.05):
         self.threshold = threshold
+        self.IGNORE_KW = ['忽略不计', '忽略', '不计']
 
-    def check(self, content_value: str, report_value: str, cell_ref: str) -> Optional[CheckError]:
-        """
-        检查忽略不计标记是否正确
-
-        参数：
-            content_value: 含量数值（字符串）
-            report_value: 报告值/备注栏内容
-            cell_ref: 单元格引用
-        """
+    def check(self, content_value, report_value: str, cell_ref: str) -> Optional[CheckError]:
+        """检查忽略不计标记是否合理"""
         # 检查是否标记了"忽略不计"
-        is_ignored = False
-        for kw in self.IGNORE_KEYWORDS:
-            if kw in str(report_value):
-                is_ignored = True
-                break
-
+        is_ignored = any(kw in str(report_value) for kw in self.IGNORE_KW)
         if not is_ignored:
             return None
 
@@ -202,7 +221,6 @@ class IgnoreTermChecker:
         if isinstance(content_value, (int, float)):
             num_value = float(content_value)
         else:
-            # 从字符串中提取数字
             numbers = re.findall(r'[\d.]+', str(content_value))
             if not numbers:
                 return None
@@ -211,7 +229,6 @@ class IgnoreTermChecker:
             except ValueError:
                 return None
 
-        # 检查数值是否真的应该忽略不计
         if num_value >= self.threshold:
             return CheckError(
                 cell_ref=cell_ref,
@@ -219,64 +236,47 @@ class IgnoreTermChecker:
                 current_value=f'{num_value}% / "{report_value}"',
                 error_type='IGNORE_TERMS_WRONG',
                 message=f'含量{num_value}% ≥ 阈值{self.threshold}%，不应标记为"忽略不计"',
-                suggestion=f'移除"忽略不计"标记，或确认阈值标准'
+                suggestion='移除"忽略不计"标记，或确认阈值标准'
             )
 
         return None
 
 
-def find_data_section(ws) -> Dict:
-    """
-    尝试识别表格的数据区域
-    返回：{
-        'batch_col': 批号列索引,
-        'content_col': 含量列索引,
-        'report_col': 报告值列索引,
-        'start_row': 数据起始行,
-    }
-    """
-    result = {
-        'batch_col': None,
-        'content_col': None,
-        'report_col': None,
-        'start_row': 1,
-    }
+def find_columns(ws) -> Dict:
+    """识别表格列结构"""
+    result = {'batch_col': None, 'content_col': None, 'report_col': None, 'start_row': 1}
 
-    # 扫描前20行找表头
-    for row_idx in range(1, min(21, ws.max_row + 1)):
+    for row_idx in range(1, min(25, ws.max_row + 1)):
         for col_idx in range(1, ws.max_column + 1):
             cell_value = ws.cell(row=row_idx, column=col_idx).value
             if not cell_value:
                 continue
-
             value = str(cell_value).strip()
 
-            # 找批号列
-            if result['batch_col'] is None:
-                if '批号' in value or 'Batch' in value or 'Lot' in value:
-                    result['batch_col'] = col_idx
-                    result['start_row'] = row_idx + 1
+            if result['batch_col'] is None and ('批号' in value or 'Batch' in value or 'Lot' in value):
+                result['batch_col'] = col_idx
+                result['start_row'] = row_idx + 1
 
-            # 找含量列（已知杂质的含量）
-            if result['content_col'] is None:
-                if '含量' in value and '%' in value:
-                    result['content_col'] = col_idx
+            if result['content_col'] is None and '含量' in value and '%' in value:
+                result['content_col'] = col_idx
 
-            # 找报告值列
-            if result['report_col'] is None:
-                if '报告值' in value or ('%' in value and '忽略' in value):
-                    result['report_col'] = col_idx
+            if result['report_col'] is None and ('报告值' in value or ('%' in value and ('忽略' in value or '不计' in value))):
+                result['report_col'] = col_idx
 
-    # 如果没找到报告值列，尝试在含量列右边找
     if result['report_col'] is None and result['content_col'] is not None:
         result['report_col'] = result['content_col'] + 1
 
     return result
 
 
-def check_file(file_path: str) -> List[CheckError]:
+def check_file(file_path: str,
+               batch_format: Optional[BatchFormatValidator] = None,
+               ignore_threshold: float = 0.05) -> List[CheckError]:
     """检查整个文件"""
     errors: List[CheckError] = []
+
+    if batch_format is None:
+        batch_format = BatchFormatValidator()
 
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -285,61 +285,38 @@ def check_file(file_path: str) -> List[CheckError]:
         return errors
 
     ws = wb.active
+    section = find_columns(ws)
 
-    # 识别表格结构
-    section = find_data_section(ws)
+    batch_checker = BatchNumberChecker(batch_format)
+    ignore_checker = IgnoreTermChecker(threshold=ignore_threshold)
 
-    batch_checker = BatchNumberChecker()
-    ignore_checker = IgnoreTermChecker()
-
-    # 扫描所有单元格
     for row in ws.iter_rows():
         for cell in row:
             if cell.value is None:
                 continue
 
             value = str(cell.value).strip()
+            cell_ref = cell.coordinate
 
-            # 批号检查
-            batch_error = batch_checker.check_consistency(cell.coordinate, value)
-            if batch_error:
-                errors.append(batch_error)
+            # 批号格式检查
+            batch_checker.check(cell_ref, value)
 
-            # 忽略不计检查（只在数据区域）
+            # 忽略不计检查
             if section['content_col'] and section['report_col']:
-                col = cell.column
-                row_num = cell.row
-
-                # 检查含量列
-                if col == section['content_col'] and row_num >= section['start_row']:
+                if cell.column == section['content_col'] and cell.row >= section['start_row']:
                     content_val = cell.value
-                    # 报告值在右边一列
-                    report_cell = ws.cell(row=row_num, column=col + 1)
-                    report_val = str(report_cell.value) if report_cell.value else ''
-
-                    ignore_error = ignore_checker.check(content_val, report_val, cell.coordinate)
-                    if ignore_error:
-                        errors.append(ignore_error)
+                    if content_val is not None:
+                        report_cell = ws.cell(row=cell.row, column=cell.column + 1)
+                        report_val = str(report_cell.value) if report_cell.value else ''
+                        err = ignore_checker.check(content_val, report_val, cell_ref)
+                        if err:
+                            errors.append(err)
 
     wb.close()
 
-    wb = openpyxl.load_workbook(file_path, data_only=True)
-    ws = wb.active
-
-    # 收集所有批号进行一致性检查
-    batch_checker = BatchNumberChecker()
-
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value:
-                batch_checker.check_consistency(cell.coordinate, str(cell.value))
-
-    # 执行最终一致性检查
+    # 一致性检查
     consistency_errors = batch_checker.final_consistency_check()
-    for e in consistency_errors:
-        errors.append(e)
-
-    wb.close()
+    errors.extend(consistency_errors)
 
     return errors
 
@@ -354,20 +331,8 @@ def print_results(file_path: str, errors: List[CheckError]):
         return
 
     print(f"⚠️ 发现 {len(errors)} 个潜在问题\n")
-
-    # 按错误类型分组
-    batch_errors = [e for e in errors if '批号' in e.field]
-    ignore_errors = [e for e in errors if '忽略不计' in e.field]
-
-    for e in batch_errors:
-        print(f"[批号格式] {e.cell_ref} | {e.current_value}")
-        print(f"  问题：{e.message}")
-        print(f"  建议：{e.suggestion}")
-        print()
-
-    for e in ignore_errors:
-        print(f"[忽略不计] {e.cell_ref}")
-        print(f"  当前：{e.current_value}")
+    for e in errors:
+        print(f"[{e.field}] {e.cell_ref} | {e.current_value}")
         print(f"  问题：{e.message}")
         print(f"  建议：{e.suggestion}")
         print()
