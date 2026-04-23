@@ -111,17 +111,10 @@ class BatchNumberChecker:
             if '  ' in fixed:
                 fixed = re.sub(r'\s+', '', fixed)
 
-        # 空格检查（不管在哪里都报）
-        if ' ' in value:
-            fixed = value.replace(' ', '')
-            return CheckError(
-                cell_ref=cell_ref,
-                field='批号格式',
-                current_value=value,
-                error_type='BATCH_HAS_SPACE',
-                message='批号包含空格',
-                suggestion=f'去除空格：{fixed}'
-            )
+        # 空格检查（已禁用，按需启用）
+        # if ' ' in value:
+        #     fixed = value.replace(' ', '')
+        #     return CheckError(...)
 
         return None
 
