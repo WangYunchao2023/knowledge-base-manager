@@ -1,0 +1,25 @@
+{
+  "runs": [
+    {
+      "date": "2026-04-13T10:16:25.125424+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 71
+    },
+    {
+      "date": "2026-04-18T15:56:40.840479+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 70
+    },
+    {
+      "date": "2026-04-19T22:46:12.598546+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 71,
+      "note": "Cache-only run - all 71 files from semantic cache"
+    }
+  ],
+  "total_input_tokens": 0,
+  "total_output_tokens": 0
+}
