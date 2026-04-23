@@ -1,0 +1,20 @@
+# 跟检数据检查规则配置
+# 版本: 0.1.0
+
+batch_rules:
+  min_length: 6
+  max_length: 20
+  allowed_chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/"
+
+date_rules:
+  min_year: 2000
+  max_year_offset: 10
+  allowed_formats:
+    - "%Y-%m-%d"
+    - "%Y/%m/%d"
+    - "%Y.%m.%d"
+
+severity_levels:
+  ERROR: 高优先级，必须修正
+  WARNING: 中优先级，建议修正
+  INFO: 低优先级，仅供参考
