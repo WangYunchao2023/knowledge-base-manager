@@ -370,19 +370,29 @@ def check_file(file_path: str,
 
 
 def print_results(file_path: str, errors: List[CheckError]):
-    print(f"\n📋 检查报告：{os.path.basename(file_path)}")
-    print("=" * 50)
+    basename = os.path.basename(file_path)
 
     if not errors:
-        print("✅ 未发现明显错误")
+        print(f"📋 {basename}")
+        print(f"  ⚠️ 发现 0 个潜在问题")
         return
 
-    print(f"⚠️ 发现 {len(errors)} 个潜在问题\n")
+    # 表头
+    header = f"📋 {basename}\n  ⚠️ 发现 {len(errors)} 个潜在问题\n"
+    header += "┌──────────┬──────────┬─────────────────────────────────────────┐\n"
+    header += "│ 类型     │ 位置     │ 问题                                    │\n"
+    header += "├──────────┼──────────┼─────────────────────────────────────────┤"
+
+    print(header)
+
     for e in errors:
-        print(f"[{e.field}] {e.cell_refs} | {e.current_values}")
-        print(f"  问题：{e.message}")
-        print(f"  建议：{e.suggestion}")
-        print()
+        field = e.field.encode('utf-8')
+        # 截断过长的内容
+        values = e.current_values[:30] + '...' if len(e.current_values) > 30 else e.current_values
+        msg = e.message[:40]
+        print(f"│ {e.field:<8} │ {e.cell_refs:<8} │ {msg:<40} │")
+
+    print("└──────────┴──────────┴─────────────────────────────────────────┘")
 
 
 def main():

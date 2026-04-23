@@ -1,6 +1,6 @@
 ---
 name: impurity-data-check
-version: 0.3.0
+version: 0.5.0
 description: HPLC有关物质检测数据明显错误检查——批号格式一致性检查、忽略不计判断合理性检查
 author: Cortana 💙
 tags:
