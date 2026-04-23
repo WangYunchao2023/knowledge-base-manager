@@ -1,0 +1,13 @@
+# Cron配置 - CDE Monitor
+# 修改此文件后执行: cron update --jobId <id> --patch '{"payload": {"message": "..."}}'
+
+job:
+  name: "CDE每日指导原则检查"
+  schedule: "30 8 * * *"  # 每天8:30
+  timezone: "Asia/Shanghai"
+  enabled: true
+  
+payload:
+  model: "minimax-portal/MiniMax-M2.5"
+  thinking: "high"
+  timeout: 600

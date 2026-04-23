@@ -1,0 +1,112 @@
+﻿{
+  "version": "3.2.3",
+  "skill_name": "OpenClaw每日评分Skill-用户端",
+  "skill_type": "user",
+  "trigger_keywords": [
+    "每日AI评分",
+    "AI评分",
+    "评分登记",
+    "每日AI测评",
+    "每日AI评价"
+  ],
+  "version_keywords": [
+    "评分版本",
+    "评分Skill版本",
+    "查看评分版本"
+  ],
+  "history_keywords": [
+    "查看历史评分",
+    "历史评分",
+    "评分历史",
+    "我的评分记录"
+  ],
+  "update_keywords": [
+    "更新评分Skill",
+    "更新评分"
+  ],
+  "description": "用户端独立运行，无需安装管理端",
+  "feishu_bitable": {
+    "master_table": {
+      "app_token": "FrCsbtg5Qavsf7st5xmcLqKlnbc",
+      "description": "评分数据汇总表（只读，用于查询历史评分）"
+    },
+    "daily_table": {
+      "app_token": "EA5vb2RbzaF2AVsAqiucf7sznZr",
+      "description": "每日评分明细表（累计存储，提交评分用）"
+    },
+    "config_table": {
+      "app_token": "RHFeb2dFJawpHtsyX6ZcHwVZn5c",
+      "table_id": "tbl4KGprFgOtLodw",
+      "description": "配置表（读取时间窗口等动态配置）"
+    },
+    "permission_table": {
+      "app_token": "E1olbOW5iaHAiIsXxZxcxIBdn9b",
+      "table_id": "tbl3YE7m6ngXkFqM",
+      "description": "权限分配表（只读，查看权限分配状态）"
+    },
+    "version_table": {
+      "app_token": "FEyJbVnADaC1TZshvUqc791In7b",
+      "table_id": "tbl4YgNTSPBaLPuR",
+      "description": "版本管理表（组织级只读，检查版本更新）"
+    }
+  },
+  "submit_time_window": {
+    "enabled": true,
+    "start": "00:00",
+    "end": "23:59",
+    "note": "实际值从配置表动态读取，此为本地备份"
+  },
+  "scoring": {
+    "max_score": 100,
+    "dimensions": [
+      "活跃度",
+      "深度",
+      "持续性",
+      "创新度"
+    ],
+    "each_max": 25,
+    "levels": {
+      "活跃度": "每天多次使用(20-25) / 每天使用1次(15-19) / 每周使用几次(10-14) / 偶尔使用(0-9)",
+      "深度": "使用5+种工具(20-25) / 使用3-4种工具(15-19) / 使用1-2种工具(0-14)",
+      "持续性": "使用超过1个月(20-25) / 使用2-4周(15-19) / 使用不到2周(0-14)",
+      "创新度": "用过高级功能(20-25) / 基础功能使用(10-19) / 仅聊天(0-9)"
+    },
+    "rating_levels": {
+      "A": {
+        "name": "优秀",
+        "min": 85,
+        "max": 100
+      },
+      "B": {
+        "name": "良好",
+        "min": 70,
+        "max": 84
+      },
+      "C": {
+        "name": "一般",
+        "min": 55,
+        "max": 69
+      },
+      "D": {
+        "name": "待提升",
+        "min": 0,
+        "max": 54
+      }
+    }
+  },
+  "skill_managers": [
+    {
+      "open_id": "ou_9b6700282aa925e38877623705a5c58e",
+      "name": "林丰丰"
+    },
+    {
+      "open_id": "ou_e3df5059c853e5497e695aa33d88b5e1",
+      "name": "满菲"
+    },
+    {
+      "open_id": "ou_6538e67ece98eb9f8e59dad290e9c6ad",
+      "name": "黄丽丹"
+    }
+  ],
+  "update_date": "2026-03-29"
+}

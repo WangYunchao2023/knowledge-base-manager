@@ -1,0 +1,26 @@
+{
+  "activity_score": 8,
+  "depth_score": 22,
+  "continuity_score": 13,
+  "innovation_score": 20,
+  "total_score": 63,
+  "rating": "C",
+  "rating_desc": "一般",
+  "overall_eval": "使用较少，工具运用深入，善用高级功能。",
+  "details": {
+    "user_messages": 16,
+    "bot_responses": 1,
+    "tools_used": [
+      "file_operation",
+      "skill_management",
+      "feishu_bitable",
+      "data_analysis",
+      "rating_skill"
+    ],
+    "tool_count": 5,
+    "days_active": 6,
+    "advanced_features": [
+      "custom_skill"
+    ]
+  }
+}

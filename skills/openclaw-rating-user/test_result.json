@@ -1,0 +1,24 @@
+{
+  "data": {
+    "total_dialogues": 15,
+    "avg_daily_frequency": "每天多次",
+    "top3_tools": "feishu, file, search",
+    "peak_hours": "09:00-14:00",
+    "success_tasks": 12,
+    "failed_tasks": 2,
+    "ongoing_tasks": "有",
+    "cron_task_rate": "90%",
+    "main_scenario": "日常办公、自动化任务",
+    "run_duration": "5天",
+    "tools_count": 4
+  },
+  "scores": {
+    "activity_score": 23,
+    "depth_score": 17,
+    "continuity_score": 15,
+    "innovation_score": 23,
+    "total_score": 78,
+    "rating": "B",
+    "overall_eval": "使用良好，活跃度很高，建议多尝试高级功能。"
+  }
+}

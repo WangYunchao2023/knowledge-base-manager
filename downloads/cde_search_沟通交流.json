@@ -1,0 +1,67 @@
+{
+  "msg": "操作成功",
+  "code": 200,
+  "data": {
+    "records": [
+      {
+        "issueDate": "20231229",
+        "nowstate": "颁布",
+        "fclass": "生物制品",
+        "title": "细胞和基因治疗产品临床相关沟通交流技术指导原则",
+        "isnew": 0,
+        "zdyzIdCODE": "070ad6c2cba1ae39238ba1136ee63961"
+      },
+      {
+        "issueDate": "20230216",
+        "nowstate": "颁布",
+        "fclass": "化学药,中药,生物制品",
+        "title": "真实世界证据支持药物注册申请的沟通交流指导原则（试行）",
+        "isnew": 0,
+        "zdyzIdCODE": "88f025ffa2590e6f08997bf54a7fc18e"
+      },
+      {
+        "issueDate": "20220429",
+        "nowstate": "颁布",
+        "fclass": "中药",
+        "title": "基于“三结合”注册审评证据体系下的沟通交流指导原则（试行）",
+        "isnew": 0,
+        "zdyzIdCODE": "bba25015922ed14a388d9670d4ca0b3f"
+      },
+      {
+        "issueDate": "20201203\n",
+        "nowstate": "颁布",
+        "fclass": "化学药,生物制品\n",
+        "title": "单臂试验支持上市的抗肿瘤药上市许可申请前临床方面沟通交流技术指导原则",
+        "summary": "单臂试验支持上市的抗肿瘤药上市许可申请前临床方面沟通交流技术指导原则",
+        "isnew": 0,
+        "zdyzIdCODE": "35629bbab068c2df46f88705b1226e28"
+      },
+      {
+        "issueDate": "20201203",
+        "nowstate": "颁布",
+        "fclass": "化学药,生物制品",
+        "title": "单臂试验支持上市的抗肿瘤药进入关键试验前临床方面沟通交流技术指导原则",
+        "summary": "单臂试验支持上市的抗肿瘤药进入关键试验前临床方面沟通交流技术指导原则",
+        "isnew": 0,
+        "zdyzIdCODE": "980f319698d4f70c26842958555a36cd"
+      },
+      {
+        "issueDate": "20201110",
+        "nowstate": "颁布",
+        "fclass": "中药\n",
+        "title": "中药新药研究过程中沟通交流会的药学资料要求（试行）",
+        "isnew": 0,
+        "zdyzIdCODE": "dd5fd971db9ea2e66e727633d401bce2"
+      }
+    ],
+    "total": 6,
+    "size": 10,
+    "current": 1,
+    "orders": [],
+    "optimizeCountSql": true,
+    "searchCount": true,
+    "countId": null,
+    "maxLimit": null,
+    "pages": 1
+  }
+}
