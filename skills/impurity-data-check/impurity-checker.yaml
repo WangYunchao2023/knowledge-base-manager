@@ -1,1 +1,42 @@
-report_threshold: 0.05
+# ============================================================
+# HPLC 有关物质检查器 - 全局配置文件
+# 版本: 0.8.0
+# ============================================================
+# 放置位置（skill 目录）：
+#   ~/.openclaw/workspace/skills/impurity-data-check/impurity-checker.yaml
+#
+# 阈值优先级（从高到低）：
+#   1. --threshold 命令行参数
+#   2. 项目级配置 project_configs（文件名/路径/Excel内容匹配）
+#   3. 全局默认配置 default_threshold / impurity_thresholds
+#   4. Excel 表头自动识别
+#   5. 内置默认值 0.05%
+#
+# 项目匹配方式（优先级从高到低）：
+#   a. 文件名包含关键词
+#   b. 文件路径包含关键词
+#   c. Excel 文件内容（前35行）包含关键词
+# ============================================================
+
+# ── 项目级配置 ──
+project_configs:
+
+  # 黄体酮预灌封有关物质
+  # 关键词可来自：文件名（如"黄体酮预灌封"）、文件内容（如"黄体酮预灌封有关物质检测结果"）
+  "黄体酮预灌封":
+    default_threshold: 0.05
+    impurity_thresholds:
+      "杂质M": 0.1
+      "其他单个杂质": 0.05
+
+  # 其他项目示例：
+  # "甲硝唑注射液":
+  #   default_threshold: 0.10
+  #   impurity_thresholds:
+  #     "杂质A": 0.10
+  #     "其他单个杂质": 0.05
+
+# ── 全局默认配置（无项目匹配时使用） ──
+default_threshold: 0.05
+impurity_thresholds:
+  "杂质M": 0.05

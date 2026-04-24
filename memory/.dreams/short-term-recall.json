@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-04-23T06:45:22.587Z",
+  "updatedAt": "2026-04-24T00:57:41.636Z",
   "entries": {
     "memory:memory/2026-03-26.md:1:19": {
       "key": "memory:memory/2026-03-26.md:1:19",
@@ -187,13 +187,13 @@
       "endLine": 27,
       "source": "memory",
       "snippet": "- 新增 `.node_src_map.json`：1020条节点→内容映射 ### 重要教训 - **graph.json 损坏教训**：14:20 生成的 graph.json 只有1056节点/0边（缺少边数据），是因为 graphify_build_final.py 在追加写入时截断/覆盖了原文件 - 修复：从头重新运行完整脚本（或保留备份） - 教训：后续改进 graphify skill，确保边数据在追加写入前有备份 - **SKILL.md 未更新的问题**：之前多次对话都修改了代码但没更新 SKILL.md，导致新能力没有固化 - 教训：任何 skill 代码改动必须同步更新 SKILL.md frontmatter version + 变更日志 ### 操作日志",
-      "recallCount": 7,
+      "recallCount": 8,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 3.8393009796738617,
+      "totalScore": 4.430929903686046,
       "maxScore": 0.5925971537828445,
       "firstRecalledAt": "2026-04-13T15:18:23.400Z",
-      "lastRecalledAt": "2026-04-18T21:37:28.525Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
       "queryHashes": [
         "f61d37324b97",
         "12f810170fe5",
@@ -201,13 +201,15 @@
         "08fd0dbd072b",
         "cfa935768cbd",
         "7f97527d7808",
-        "4a9c14f41a3f"
+        "4a9c14f41a3f",
+        "0a75aeefa838"
       ],
       "recallDays": [
         "2026-04-13",
         "2026-04-14",
         "2026-04-15",
-        "2026-04-19"
+        "2026-04-19",
+        "2026-04-24"
       ],
       "conceptTags": [
         "备份",
@@ -263,25 +265,27 @@
       "endLine": 50,
       "source": "memory",
       "snippet": "- [ ] 将 `graphify query` 语义检索能力真正集成到 OpenClaw skill（目前 SKILL.md 只有流程说明，无实际工具集成） - [ ] 测试增强 HTML 的节点点击 → 文件打开功能 - [ ] 确认 graph.json 的边数据是否需要从备份恢复",
-      "recallCount": 5,
+      "recallCount": 6,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 2.683749769628048,
-      "maxScore": 0.5672778889536857,
+      "totalScore": 3.2816379532217983,
+      "maxScore": 0.59788818359375,
       "firstRecalledAt": "2026-04-13T15:18:23.400Z",
-      "lastRecalledAt": "2026-04-21T13:37:58.899Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
       "queryHashes": [
         "f61d37324b97",
         "c19ff43dee45",
         "08fd0dbd072b",
         "cfa935768cbd",
-        "fc05c69e4122"
+        "fc05c69e4122",
+        "0a75aeefa838"
       ],
       "recallDays": [
         "2026-04-13",
         "2026-04-14",
         "2026-04-15",
-        "2026-04-21"
+        "2026-04-21",
+        "2026-04-24"
       ],
       "conceptTags": [
         "备份",
@@ -301,20 +305,22 @@
       "endLine": 39,
       "source": "memory",
       "snippet": "- 教训：任何 skill 代码改动必须同步更新 SKILL.md frontmatter version + 变更日志 ### 操作日志 | 时间 | 操作 | 结果 | |------|------|------| | ~13:20 | 58个PDF文本提取（pymupdf） | 成功，pdf_converted/ | | ~13:58 | 图谱完整提取脚本（graphify_full_extract.py） | 成功，143节点 | | ~14:12 | graphify_build_final.py 建图 | 成功，309边 | | ~14:20 | **graph.json 被覆盖损坏**（追加写入bug） | 1056节点/0边 | | ~14:30 | enhance_html2.py 生成增强HTML | 成功，8.4MB | | ~14:35 | 更新 graphify SKILL.md | 成功 | ### 关键文件路径 - 工作目录：`/home/wangyc/Documents/工作/法规指导原则/安评/`",
-      "recallCount": 2,
+      "recallCount": 3,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 1.0150734454393386,
-      "maxScore": 0.5111369282007218,
+      "totalScore": 1.617274311184883,
+      "maxScore": 0.6022008657455444,
       "firstRecalledAt": "2026-04-13T15:18:23.400Z",
-      "lastRecalledAt": "2026-04-14T17:08:23.954Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
       "queryHashes": [
         "f61d37324b97",
-        "08fd0dbd072b"
+        "08fd0dbd072b",
+        "0a75aeefa838"
       ],
       "recallDays": [
         "2026-04-13",
-        "2026-04-15"
+        "2026-04-15",
+        "2026-04-24"
       ],
       "conceptTags": [
         "skill.md",
@@ -676,13 +682,13 @@
       "endLine": 23,
       "source": "memory",
       "snippet": "# 记忆 - 2026-04-14 --- ## 安评法规图谱构建结果 ### graphify_anshang 产出 - ✅ `graphify_anshang.html` 已生成 - ✅ `graphify_anshang_20260411.gexf` 已生成 - ⚠️ 部分 PDF 文件解析失败（invalid PDF header / EOF marker not found） ### PDF 解析失败记录 - 来源：`nova-cru` 任务 - 原因：PDF 文件损坏或非标准格式（返回了 `<!DOC` 而非有效 PDF 头） - 影响范围：少量文件，不影响主体图谱构建 --- --- ## markdown-graph-viewer Skill 构建（今日核心工作） ### 完成内容 - 创建主 Skill：`~/.openclaw/workspace/skills/markdown-graph-viewer/`",
-      "recallCount": 8,
+      "recallCount": 9,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 4.57464005202055,
+      "totalScore": 5.1674491807818415,
       "maxScore": 0.6040778800845146,
       "firstRecalledAt": "2026-04-14T14:57:57.602Z",
-      "lastRecalledAt": "2026-04-18T23:36:14.353Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
       "queryHashes": [
         "c19ff43dee45",
         "d99304cb897c",
@@ -691,13 +697,15 @@
         "7f97527d7808",
         "d9002e98e7ee",
         "4a9c14f41a3f",
-        "1d4921a17a7b"
+        "1d4921a17a7b",
+        "0a75aeefa838"
       ],
       "recallDays": [
         "2026-04-14",
         "2026-04-15",
         "2026-04-16",
-        "2026-04-19"
+        "2026-04-19",
+        "2026-04-24"
       ],
       "conceptTags": [
         "graphify-anshang",
@@ -1608,6 +1616,68 @@
         "report",
         "writer",
         "skill"
+      ]
+    },
+    "memory:memory/2026-03-19.md:1:15": {
+      "key": "memory:memory/2026-03-19.md:1:15",
+      "path": "memory/2026-03-19.md",
+      "startLine": 1,
+      "endLine": 15,
+      "source": "memory",
+      "snippet": "# 2026-03-19 工作日志 ## 任务：优化 web-access skill ### 完成的工作 1. **CDE网站高反爬问题解决** - 发现CDE网站使用JavaScript混淆 + 严格反爬检测 - headless模式无法获取内容 - **解决方案**：使用非headless模式 + 增强反检测脚本 2. **下载成功** - 成功下载2026年3月9日CDE发布的5个指导原则文件： - 治疗用重组蛋白药物上市许可申请质量综述资料撰写指导原则（征求意见稿）.pdf - 生物类似药上市许可申请质量综述资料撰写指导原则（征求意见稿）.pdf",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.5929709419608116,
+      "maxScore": 0.5929709419608116,
+      "firstRecalledAt": "2026-04-24T00:57:41.636Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
+      "queryHashes": [
+        "0a75aeefa838"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "web-access",
+        "工作",
+        "日志",
+        "任务",
+        "web",
+        "access",
+        "skill",
+        "完成"
+      ]
+    },
+    "memory:memory/2026-03-30.md:83:85": {
+      "key": "memory:memory/2026-03-30.md:83:85",
+      "path": "memory/2026-03-30.md",
+      "startLine": 83,
+      "endLine": 85,
+      "source": "memory",
+      "snippet": "- DISPLAY/XAUTHORITY 环境变量问题已记录到各版本 SKILL.md - 本地 Chromium + 用户 Chrome Profile 的 cookies 复用方案从未实现（用户再次问起）",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.5891428858041763,
+      "maxScore": 0.5891428858041763,
+      "firstRecalledAt": "2026-04-24T00:57:41.636Z",
+      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
+      "queryHashes": [
+        "0a75aeefa838"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "display/xauthority",
+        "skill.md",
+        "display",
+        "xauthority",
+        "环境",
+        "变量",
+        "问题",
+        "记录"
       ]
     }
   }
