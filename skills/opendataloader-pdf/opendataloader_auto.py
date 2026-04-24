@@ -170,10 +170,9 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 continue  # 跳过数字页，只 OCR 扫描页
             try:
                 page = doc.get_page(page_idx)
-                # 用较低分辨率渲染（72→60dpi，quality 75→70），减少VRAM压力
-                pil_img = page.render(scale=60 / 72.0).to_pil()
+                pil_img = page.render(scale=72 / 72.0).to_pil()
                 buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=70)
+                pil_img.save(buf, format="JPEG", quality=75)
                 img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 pil_img.close()  # 立即释放PIL图像内存
             except Exception as e:
