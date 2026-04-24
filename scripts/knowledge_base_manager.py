@@ -31,7 +31,7 @@ from pathlib import Path
 # ============ 配置区 ============
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
 INDEX_FILE = os.path.join(KB_ROOT, "guidance_index.json")
-OPENDATALOADER_SCRIPT = "/home/wangyc/.openclaw/workspace/skills/opendataloader-pdf/scripts/opendataloader_auto.py"
+OPENDATALOADER_SCRIPT = "/home/wangyc/.openclaw/workspace/skills/opendataloader-pdf/opendataloader_auto.py"
 
 # 目录规范
 DIR_RAW = "原始文件"
@@ -506,6 +506,7 @@ def main():
             fname = os.path.basename(input_path)
             new_files = [{"path": input_path, "name": fname, "ext": os.path.splitext(fname)[1].lower()}]
             log(f"添加指定文件: {input_path}", "📂")
+            index_data = load_index()  # 加载索引（单文件模式也需要）
         elif os.path.isdir(input_path):
             new_files = scan_for_new_files([input_path], set())
             log(f"扫描目录: {input_path}", "📂")
