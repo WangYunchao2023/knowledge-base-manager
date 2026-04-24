@@ -29,6 +29,29 @@ import time
 import re
 from pathlib import Path
 
+
+# ---------- 辅助函数 ----------
+def _parse_markdown_table(md_text: str) -> list:
+    """
+    解析 Markdown 表格文本为 2D 数组。
+    输入: "列1 | 列2 | 列3\n值1 | 值2 | 值3\n..."
+    输出: [["列1", "列2", "列3"], ["值1", "值2", "值3"], ...]
+    """
+    rows = []
+    for line in md_text.strip().split('\n'):
+        line = line.strip()
+        if not line or line.startswith('|---') or line.startswith('---'):
+            continue
+        # 去掉首尾的 |
+        if line.startswith('|'):
+            line = line[1:]
+        if line.endswith('|'):
+            line = line[:-1]
+        cells = [c.strip() for c in line.split('|')]
+        rows.append(cells)
+    return rows
+
+
 # ---------- Java 路径 ----------
 JAVA_BIN = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64/bin/java"
 JAVA_HOME = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64"
@@ -64,17 +87,22 @@ def check_qwen_available() -> bool:
     return False
 
 
-QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识别这张 PDF 扫描页的内容，并按以下 JSON 格式返回：
+QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识别这张 PDF 页面的内容，并按以下 JSON 格式返回：
 ```json
 {
   "page": <页码>,
   "blocks": [
-    {"type": "text", "content": "<识别的文本内容，保持原有换行和段落结构>"},
-    {"type": "table", "content": "<表格 Markdown 格式（如 | col1 | col2 |）>"}
+    {"type": "text", "content": "<识别的文本段落>", "heading": "<如果是标题则填入标题文本，否则空字符串>"},
+    {"type": "table", "content": "<表格的纯文本表示，每行用换行分隔>", "table_data": [["列1", "列2", "列3"], ["值1", "值2", "值3"], ["值4", "值5", "值6"]]}
   ]
 }
 ```
-重要：只输出 JSON，text 块保持阅读顺序，table 块用 | 分隔，中英文都要准确。"""
+重要规则：
+1. 只输出 JSON，不要任何解释
+2. table 块必须同时提供 content（纯文本）和 table_data（2D 数组），缺一不可
+3. table_data 每个单元格必须是字符串，空单元格用 "" 表示
+4. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
+5. 识别所有中英文内容，数字、符号、化学式都要准确"""
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
@@ -200,13 +228,25 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 if not bcontent:
                     continue
                 if btype == "text":
+                    heading = block.get("heading", "") or ""
                     total_paras += 1
-                    all_elements.append({"type": "paragraph", "content": bcontent,
-                        "page_number": page_num, "paragraph_index": total_paras})
+                    elem = {"type": "paragraph", "content": bcontent,
+                        "page_number": page_num, "paragraph_index": total_paras}
+                    if heading:
+                        elem["heading"] = heading
+                    all_elements.append(elem)
                 elif btype == "table":
                     total_tables += 1
-                    all_elements.append({"type": "table", "content": bcontent,
-                        "page_number": page_num, "table_index": total_tables})
+                    elem = {"type": "table", "content": bcontent,
+                        "page_number": page_num, "table_index": total_tables}
+                    # 提取 table_data（2D 数组，qwen2.5vl 输出）
+                    table_data = block.get("table_data")
+                    if table_data and isinstance(table_data, list):
+                        elem["table_data"] = table_data
+                    else:
+                        # fallback：从 content 解析 Markdown 表格
+                        elem["table_data"] = _parse_markdown_table(bcontent)
+                    all_elements.append(elem)
 
             print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
 
@@ -1319,7 +1359,7 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
         print("[错误] 无法读取 PDF 页", file=sys.stderr)
         return result
 
-    # 全部是 digital 页 → 直接走 opendataloader，无需 OCR
+    # 全部是 digital 页 → 直接走 opendataloader（快，适合无表格文档）
     if not scanned_pages:
         print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，直接用 opendataloader 提取...")
         detection = {"type": "digital", "lang": lang, "total_pages": total}
@@ -1362,97 +1402,23 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
             pass
         return result
 
-    # 混合 PDF：digital 页用 opendataloader，scanned 页用 OCR
-    print(f"[Step 2/4] digital 页({len(digital_pages)}个) → opendataloader | scanned 页({len(scanned_pages)}个) → qwen2.5vl OCR")
+    # 混合 PDF（digital + scanned）：所有页都用 qwen2.5vl
+    # 原因：digital 页中也可能包含表格，opendataloader 会丢失表格结构
+    print(f"[Step 2/4] 混合 PDF，所有 {total} 页 → qwen2.5vl（保证表格结构）")
 
     # 准备临时目录
-    tmp_digital_dir = os.path.join(output_dir, "_tmp_digital")
     tmp_scanned_dir = os.path.join(output_dir, "_tmp_scanned")
-    os.makedirs(tmp_digital_dir, exist_ok=True)
     os.makedirs(tmp_scanned_dir, exist_ok=True)
 
     digital_result = None
     ocr_result = None
 
-    # -- digital 页：opendataloader Fast 模式（仅 digital 页）--
-    digital_pages_str = ",".join(str(p) for p in digital_pages)
-    print(f"[      ] opendataloader 处理页: {digital_pages_str}")
-    detection = {"type": "digital", "lang": lang, "total_pages": total}
-
-    # 手动构建带 --pages 参数的命令
-    digital_cmd = [
-        sys.executable, "-m", "opendataloader_pdf",
-        pdf_path, "-o", tmp_digital_dir,
-        "-f", "json",
-        "--pages", digital_pages_str,
-    ]
-    env = os.environ.copy()
-    env["JAVA_HOME"] = JAVA_HOME
-    env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-
-    try:
-        proc = subprocess.run(digital_cmd, capture_output=True, text=True, env=env, timeout=300)
-        if proc.returncode == 0:
-            basename = Path(pdf_path).stem
-            digital_json = Path(tmp_digital_dir) / f"{basename}.json"
-            if digital_json.exists():
-                with open(digital_json, encoding="utf-8") as f:
-                    digital_result = json.load(f)
-
-                # opendataloader --pages 不返回 page_number，改为两阶段分配
-                # Stage 1: 文本匹配（对目录页等结构化内容有效）
-                try:
-                    from pypdf import PdfReader
-                    reader = PdfReader(pdf_path)
-                    page_texts = {}
-                    for i, page in enumerate(reader.pages):
-                        page_num = i + 1
-                        if page_num in digital_pages:
-                            page_texts[page_num] = (page.extract_text() or "").strip()
-
-                    digital_kids = digital_result.get("kids", [])
-                    for kid in digital_kids:
-                        if kid.get("page_number") is not None:
-                            continue
-                        content = kid.get("content", "")[:200]
-                        best_match = None
-                        for pn, ptext in page_texts.items():
-                            if content[:50] in ptext:
-                                best_match = pn
-                                break
-                        kid["page_number"] = best_match
-                except Exception:
-                    pass  # 静默失败，用 Stage 2
-
-                # Stage 2: 顺序分配（保证所有元素都有页码）
-                # 按出现顺序均分到各数字页，保留已匹配的页码
-                digital_kids = digital_result.get("kids", [])
-                unassigned = [k for k in digital_kids if k.get("page_number") is None]
-                if unassigned and digital_pages:
-                    # 按页平均分配
-                    per_page = max(1, len(unassigned) // len(digital_pages))
-                    idx = 0
-                    for kid in unassigned:
-                        kid["page_number"] = digital_pages[min(idx // per_page, len(digital_pages) - 1)]
-                        idx += 1
-
-                digital_result["kids"] = digital_kids
-
-                print(f"[      ] opendataloader 提取 {len(digital_result.get('kids', []))} 个元素")
-        else:
-            print(f"[警告] opendataloader digital 页提取失败: {proc.stderr[:200]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[警告] opendataloader digital 页异常: {e}", file=sys.stderr)
-
-    # -- scanned 页：qwen2.5vl OCR（VRAM 让出在 qwen_ocr_pdf 内部处理）--
-    print(f"[Step 3/4] scanned 页 OCR: {scanned_pages}")
-
-    # 用 qwen_ocr_pdf 处理 scanned 页，它自带 VRAM 协调
+    # 用 qwen_ocr_pdf 处理全部页面，它自带 VRAM 协调
     ocr_call_result = qwen_ocr_pdf(
         pdf_path=pdf_path,
         output_dir=tmp_scanned_dir,
         lang=lang,
-        pages_to_skip=digital_pages,  # 跳过数字页，只 OCR 扫描页
+        pages_to_skip=[],  # 处理全部页（digital 页也会重新提取以保留表格）
     )
 
     # 加载 OCR 结果的 JSON（qwen_ocr_pdf 只返回文件路径）
@@ -1461,16 +1427,18 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
         try:
             with open(ocr_call_result["json_path"], encoding="utf-8") as f:
                 ocr_json = json.load(f)
-                # 转换为 kids 结构（兼容 merge_per_page_results）
                 ocr_result["kids"] = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
                 ocr_result["total_tables"] = ocr_json.get("traceability", {}).get("total_tables", 0)
                 ocr_result["total_paragraphs"] = ocr_json.get("traceability", {}).get("total_paragraphs", 0)
         except Exception as e:
             print(f"[警告] 加载 OCR 结果失败: {e}", file=sys.stderr)
 
-    # Step 4: 合并结果
-    print(f"[Step 4/4] 合并 digital + OCR 结果...")
-    merged = merge_per_page_results(digital_result or {}, ocr_result or {})
+    # Step 4/4: 生成最终输出
+    print(f"[Step 4/4] 生成最终 JSON 和 Markdown...")
+
+    # qwen2.5vl 的结果即为最终结果（无需合并）
+    merged = ocr_result if ocr_result else {"kids": [], "total_tables": 0, "total_paragraphs": 0}
+    merged.setdefault("kids", merged.pop("elements", merged.pop("flat_elements", [])))
 
     basename = Path(pdf_path).stem
     merged_json_path = Path(output_dir) / f"{basename}.json"
@@ -1485,7 +1453,6 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
 
     # 清理临时目录
     import shutil
-    shutil.rmtree(tmp_digital_dir, ignore_errors=True)
     shutil.rmtree(tmp_scanned_dir, ignore_errors=True)
 
     print(f"[成功] 逐页自适应处理完成！")
