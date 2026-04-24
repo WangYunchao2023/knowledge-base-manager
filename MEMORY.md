@@ -38,6 +38,10 @@
 | 日期 | 教训 |
 |------|------|
 | 2026-03-17 | **会话导出保存要求**：用户要求保存完整对话时，必须：1)按问答顺序完整保存 2)开头结尾加黄色高亮标记Session ID 3)不截断内容 4)包含工作目录和开始/结束时间 |
+| 2026-04-24 | **PDF处理架构**：混合PDF必须逐页判断（digital vs scanned），不能整文档一刀切；内容哈希比对应在提取后而非提取前 |
+| 2026-04-24 | **VRAM协调**：qwen2.5vl OCR前必须调用vram_manager让出显存，否则OOM；VRAM恢复用try/finally确保执行 |
+| 2026-04-24 | **opendataloader --pages参数**：会导致所有元素page_number=None，需要后处理补全页码（文本匹配+顺序分配） |
+| 2026-04-24 | **vram_manager调用**：路径`/home/wangyc/.openclaw/scripts/vram_manager.py`；推荐CLI模式`python3 ~/.openclaw/scripts/vram_manager.py acquire|release|status`跨session调用 |
 
 ## 会话保存规范
 
