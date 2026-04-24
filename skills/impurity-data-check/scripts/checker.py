@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 HPLC有关物质检测数据明显错误检查器
-版本: 0.7.0
-功能：批号格式一致性检查、忽略不计判断校验、报告限动态判断
+版本: 0.8.0
+功能：批号格式一致性检查、忽略不计判断校验、支持按杂质名称配置不同报告限
 
-支持三种阈值指定方式（优先级从高到低）：
-1. 命令行 --threshold 参数
-2. 被检文件同目录的 impurity-checker.yaml 配置文件
-3. skill 目录的 impurity-checker.yaml 配置文件
-4. 默认值 0.05%
+支持阈值配置方式（优先级从高到低）：
+1. 命令行 --threshold 参数（全局单一阈值）
+2. 配置文件 impurity-checker.yaml（支持按杂质名称设置不同阈值）
+3. Excel 表头自动识别
+4. 内置默认值 0.05%
 """
 
 import re
@@ -32,76 +32,145 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────
 # 配置文件查找路径
 # ─────────────────────────────────────────────────────────────────
-SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def find_config_file(excel_path: str) -> Optional[str]:
-    """按优先级查找配置文件"""
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(excel_path)), 'impurity-checker.yaml'),
-        os.path.join(SKILL_DIR, 'impurity-checker.yaml'),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    """优先查找 skill 目录的配置文件"""
+    skill_config = os.path.join(SKILL_DIR, 'impurity-checker.yaml')
+    if os.path.exists(skill_config):
+        return skill_config
     return None
 
 
-def load_threshold_from_config(excel_path: str) -> Optional[float]:
-    """从配置文件读取报告限阈值"""
+def load_config(excel_path: str) -> Dict:
+    """加载配置文件，返回完整配置字典"""
     config_path = find_config_file(excel_path)
     if not config_path:
-        return None
+        return {}
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        threshold = config.get('report_threshold') or config.get('threshold')
-        if threshold is not None:
-            val = float(threshold)
-            print(f"  📎 配置文件: {config_path}")
-            print(f"  📎 报告限: {val}%")
-            return val
+        return config or {}
     except Exception as e:
         print(f"  ⚠️ 配置文件读取失败 ({config_path}): {e}")
-    return None
+        return {}
 
 
-def auto_detect_threshold_from_excel(ws) -> Optional[float]:
+# ─────────────────────────────────────────────────────────────────
+# 阈值解析（支持项目级配置 + 杂质级阈值）
+# ─────────────────────────────────────────────────────────────────
+class ThresholdResolver:
     """
-    从 Excel 表头区域自动识别报告限值
-    支持格式：
-      报告限：0.05%
-      报告限 0.05%
-      报告阈值：0.05%
-      报告阈值 0.05%
-      报告限值 0.05%
-      定量限 0.05%（也作为报告限参考）
+    阈值解析器
+    支持：
+    - 项目级覆盖 project_overrides（每个项目可有独立 default_threshold + impurity_thresholds）
+    - 杂质级阈值 impurity_thresholds（全局默认，按杂质名称模糊匹配）
+    - default_threshold：全局默认阈值
     """
-    keywords = [
-        r'报告限[：:\s]*([\d.]+)%',
-        r'报告阈值[：:\s]*([\d.]+)%',
-        r'报告限值[：:\s]*([\d.]+)%',
-        r'定量限[：:\s]*([\d.]+)%',
-        r'report\s*limit[：:\s]*([\d.]+)%',
-        r'report\s*threshold[：:\s]*([\d.]+)%',
-    ]
 
-    # 只扫描前 35 行（表头区域）
-    for row in ws.iter_rows(min_row=1, max_row=35):
-        for cell in row:
-            if cell.value is None:
-                continue
-            text = str(cell.value).strip()
-            for kw_pattern in keywords:
-                m = re.search(kw_pattern, text, re.IGNORECASE)
-                if m:
-                    try:
-                        val = float(m.group(1))
-                        if 0 < val < 100:  # 合理范围
-                            print(f"  🔍 自动识别报告限: {val}% (来源: {cell.coordinate})")
-                            return val
-                    except ValueError:
-                        pass
-    return None
+    def __init__(self, config: Dict, project_cfg: Optional[Dict] = None):
+        self.config = config
+        # 项目级配置（字典格式：default_threshold + impurity_thresholds）
+        self.project_cfg = project_cfg
+        # 全局兜底
+        self.default_threshold = float(
+            config.get('default_threshold') or config.get('report_threshold') or 0.05
+        )
+        self.impurity_thresholds = config.get('impurity_thresholds', {})
+
+    def get_active_project(self, excel_path: str, ws=None) -> Tuple[Optional[str], Optional[Dict]]:
+        """
+        检测当前文件匹配哪个项目，返回 (项目关键词, 项目配置字典)
+        搜索范围：文件名 > 路径 > Excel文件内容（前35行）
+        """
+        project_configs = self.config.get('project_configs', {})
+        if not project_configs:
+            return None, None
+
+        excel_name = os.path.basename(excel_path)
+        excel_dir = os.path.dirname(os.path.abspath(excel_path))
+
+        # 1. 先从文件名/路径匹配
+        for keyword, proj_cfg in project_configs.items():
+            if keyword in excel_name or keyword in excel_dir:
+                return keyword, proj_cfg if isinstance(proj_cfg, dict) else None
+
+        # 2. 从 Excel 内容（前35行）匹配
+        if ws is not None:
+            content_texts = []
+            for row in ws.iter_rows(min_row=1, max_row=35):
+                for cell in row:
+                    if cell.value and isinstance(cell.value, str):
+                        content_texts.append(cell.value.strip())
+            full_text = '\n'.join(content_texts)
+            for keyword, proj_cfg in project_configs.items():
+                if keyword in full_text:
+                    return keyword, proj_cfg if isinstance(proj_cfg, dict) else None
+
+        return None, None
+
+    def get_threshold(self, impurity_name: str) -> float:
+        """
+        根据杂质名称获取对应阈值
+        匹配规则：精确匹配 > 包含匹配
+        """
+        # 优先使用项目级配置
+        if self.project_cfg:
+            project_impurities = self.project_cfg.get('impurity_thresholds', {})
+            if project_impurities:
+                for key, val in project_impurities.items():
+                    if key == impurity_name:
+                        return float(val)
+                for key, val in project_impurities.items():
+                    if key in impurity_name:
+                        return float(val)
+        # 兜底全局配置
+        if self.impurity_thresholds:
+            for key, val in self.impurity_thresholds.items():
+                if key == impurity_name:
+                    return float(val)
+            for key, val in self.impurity_thresholds.items():
+                if key in impurity_name:
+                    return float(val)
+        # 使用 default_threshold（优先项目级，其次全局）
+        if self.project_cfg:
+            return float(self.project_cfg.get('default_threshold', self.default_threshold))
+        return self.default_threshold
+
+    def get_default_threshold(self) -> float:
+        """获取默认阈值（优先项目级）"""
+        if self.project_cfg:
+            return float(self.project_cfg.get('default_threshold', self.default_threshold))
+        return self.default_threshold
+
+    def resolve(self, excel_path: str, active_project: Optional[str] = None) -> Tuple[float, List[str]]:
+        lines = []
+        config_path = find_config_file(excel_path)
+        if config_path:
+            lines.append(f"📎 配置文件: {config_path}")
+
+        if active_project and self.project_cfg:
+            lines.append(f"📎 匹配项目: {active_project}")
+            proj_default = self.project_cfg.get('default_threshold', self.default_threshold)
+            lines.append(f"📎 项目默认报告限: {proj_default}%")
+            proj_impurities = self.project_cfg.get('impurity_thresholds', {})
+            if proj_impurities:
+                lines.append(f"📎 项目杂质阈值: {len(proj_impurities)} 项")
+                for name, val in list(proj_impurities.items())[:5]:
+                    lines.append(f"    · {name} → {val}%")
+                if len(proj_impurities) > 5:
+                    lines.append(f"    · ... 共 {len(proj_impurities)} 项")
+        else:
+            lines.append(f"📎 默认报告限: {self.default_threshold}%")
+            if self.impurity_thresholds:
+                lines.append(f"📎 杂质专用阈值: {len(self.impurity_thresholds)} 项")
+                for name, val in list(self.impurity_thresholds.items())[:5]:
+                    lines.append(f"    · {name} → {val}%")
+                if len(self.impurity_thresholds) > 5:
+                    lines.append(f"    · ... 共 {len(self.impurity_thresholds)} 项")
+
+        return self.get_default_threshold(), lines
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -109,7 +178,6 @@ def auto_detect_threshold_from_excel(ws) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────────
 @dataclass
 class CheckError:
-    """检查错误"""
     cell_refs: str
     field: str
     current_values: str
@@ -127,12 +195,6 @@ class CheckError:
 # 批号格式验证器
 # ─────────────────────────────────────────────────────────────────
 class BatchFormatValidator:
-    """
-    批号格式验证器
-    标准格式：项目编号(可变长)-两位年两位月两位日-两位序号
-    例如：LMS002-260401-05
-    """
-
     def __init__(self,
                  pattern: str = r'^(.+)-(\d{2})(\d{2})(\d{2})-(\d{2})$',
                  pattern_desc: str = '项目编号-年月日-序号（例：LMS002-260401-05）'):
@@ -146,18 +208,14 @@ class BatchFormatValidator:
         return self._compiled.match(batch.strip()) is not None
 
     def normalize(self, batch: str) -> Optional[str]:
-        """将非标准格式批号标准化，如 LMS002-26040105 → LMS002-260401-05"""
         batch = batch.strip()
         if self.is_valid(batch):
             return batch
-
         match = re.match(r'^(.+)-(\d{8})$', batch)
         if match:
-            prefix = match.group(1)
-            digits = match.group(2)
+            prefix, digits = match.group(1), match.group(2)
             if digits.isdigit():
                 return f"{prefix}-{digits[:6]}-{digits[6:8]}"
-
         return None
 
 
@@ -165,16 +223,11 @@ class BatchFormatValidator:
 # 合并单元格解析器
 # ─────────────────────────────────────────────────────────────────
 class MergedCellResolver:
-    """合并单元格解析器"""
-
     def __init__(self, ws):
         self.ws = ws
         self.master_map: Dict[str, str] = {}
-        self.merged_ranges: List[Tuple[int, int, int, int]] = []
-
         for merged_range in ws.merged_cells.ranges:
             min_row, min_col, max_row, max_col = merged_range.bounds
-            self.merged_ranges.append((min_row, min_col, max_row, max_col))
             master_ref = f"{get_column_letter(min_col)}{min_row}"
             for r in range(min_row, max_row + 1):
                 for c in range(min_col, max_col + 1):
@@ -187,19 +240,14 @@ class MergedCellResolver:
         return self.get_master(cell_ref) != cell_ref
 
     def get_merged_range_cells(self, master_ref: str) -> List[str]:
-        result = []
-        for ref, master in self.master_map.items():
-            if master == master_ref:
-                result.append(ref)
-        return result
+        return [ref for ref, m in self.master_map.items() if m == master_ref]
 
     def format_cell_ref(self, cell_ref: str) -> str:
         master = self.get_master(cell_ref)
         if self.is_merged(cell_ref):
             merged_cells = self.get_merged_range_cells(master)
             return self._format_range(merged_cells)
-        else:
-            return cell_ref
+        return cell_ref
 
     def _format_range(self, cell_refs: List[str]) -> str:
         if not cell_refs:
@@ -225,7 +273,6 @@ class MergedCellResolver:
                 parts.append(f"{cols[0]}-{cols[-1]}/{row}")
             else:
                 parts.append(f"{','.join(cols)}/{row}")
-
         return ", ".join(parts)
 
     def _is_consecutive(self, cols: List[str]) -> bool:
@@ -237,8 +284,6 @@ class MergedCellResolver:
 # 批号格式检查器
 # ─────────────────────────────────────────────────────────────────
 class BatchNumberChecker:
-    """批号格式一致性检查器"""
-
     NON_BATCH_KEYWORDS = [
         '对照品', '系统适应性', '灵敏度', '流动相', '稀释', '空白',
         '溶剂', '配制', '来源', '对照', '自身', '杂质', '名称',
@@ -282,23 +327,17 @@ class BatchNumberChecker:
     def final_check(self, resolver: MergedCellResolver) -> List[CheckError]:
         errors = []
         seen_masters = set()
-
         for raw_value, cell_ref in self.detected:
             batch_body = self._strip_suffix(raw_value)
-
             if self.batch_format.is_valid(batch_body):
                 continue
-
             normalized = self.batch_format.normalize(batch_body)
             if not normalized:
                 continue
-
             if batch_body != raw_value:
                 normalized += raw_value[len(batch_body):]
-
             master = resolver.get_master(cell_ref)
             is_merged = resolver.is_merged(cell_ref)
-
             if is_merged:
                 if master in seen_masters:
                     continue
@@ -315,37 +354,34 @@ class BatchNumberChecker:
                 message=f'批号格式不符合标准（{self.batch_format.pattern_desc}）',
                 suggestion=normalized
             ))
-
         return errors
 
 
 # ─────────────────────────────────────────────────────────────────
-# 忽略不计检查器（支持动态阈值）
+# 忽略不计检查器（支持按杂质名称动态阈值）
 # ─────────────────────────────────────────────────────────────────
 class IgnoreTermChecker:
     """
     忽略不计判断检查器
-    支持动态阈值：可通过命令行 --threshold 或配置文件指定
+    支持按杂质名称设置不同报告限
     """
 
-    def __init__(self, threshold: float = 0.05):
-        self.threshold = threshold
+    def __init__(self, threshold_resolver: ThresholdResolver):
+        self.resolver = threshold_resolver
         self.IGNORE_KW = ['忽略不计', '忽略', '不及']
-        self.detected: List[Tuple[str, str]] = []
+        # (含量值字符串, 单元格引用, 杂质名称)
+        self.detected: List[Tuple[str, str, str]] = []
 
-    def set_threshold(self, threshold: float):
-        self.threshold = threshold
-
-    def check(self, content_value, report_value: str, cell_ref: str):
+    def check(self, content_value, report_value: str, cell_ref: str, impurity_name: str = ''):
         is_ignored = any(kw in str(report_value) for kw in self.IGNORE_KW)
         if is_ignored:
-            self.detected.append((str(content_value), cell_ref))
+            self.detected.append((str(content_value), cell_ref, impurity_name))
 
     def final_check(self, resolver: MergedCellResolver) -> List[CheckError]:
         errors = []
         seen_masters = set()
 
-        for content_str, cell_ref in self.detected:
+        for content_str, cell_ref, impurity_name in self.detected:
             numbers = re.findall(r'[\d.]+', content_str)
             if not numbers:
                 continue
@@ -354,7 +390,10 @@ class IgnoreTermChecker:
             except ValueError:
                 continue
 
-            if num_value >= self.threshold:
+            # 按杂质名称获取对应阈值
+            threshold = self.resolver.get_threshold(impurity_name)
+
+            if num_value >= threshold:
                 master = resolver.get_master(cell_ref)
                 is_merged = resolver.is_merged(cell_ref)
 
@@ -366,23 +405,27 @@ class IgnoreTermChecker:
                 else:
                     formatted = resolver.format_cell_ref(cell_ref)
 
+                impurity_info = f'（{impurity_name}）' if impurity_name else ''
                 errors.append(CheckError(
                     cell_refs=formatted,
                     field='忽略不计',
-                    current_values=f'{num_value}% / "忽略不计"',
+                    current_values=f'{num_value}%{impurity_info} / "忽略不计"',
                     error_type='IGNORE_TERMS_WRONG',
-                    message=f'含量{num_value}% ≥ 报告限{self.threshold}%，不应标记为"忽略不计"',
-                    suggestion=f'移除"忽略不计"标记，或确认报告限标准'
+                    message=f'含量{num_value}% ≥ 报告限{threshold}%{impurity_info}，不应标记为"忽略不计"',
+                    suggestion=f'移除"忽略不计"标记，或确认该杂质的报告限标准'
                 ))
 
         return errors
 
 
 # ─────────────────────────────────────────────────────────────────
-# 列结构识别
+# 列结构识别（扩展：识别杂质名称列）
 # ─────────────────────────────────────────────────────────────────
 def find_columns(ws) -> List[Dict]:
-    """识别表格列结构，返回多个可能的列配置"""
+    """
+    识别表格列结构，返回多个可能的列配置
+    每项包含：content_col（含量列）, report_col（报告值列）, name_col（杂质名称列）, start_row
+    """
     results = []
 
     for row_idx in range(1, min(35, ws.max_row + 1)):
@@ -392,13 +435,32 @@ def find_columns(ws) -> List[Dict]:
                 continue
             value = str(cell_value).strip()
 
+            # 识别"含量（%）"列
             if '含量' in value and '%' in value:
+                name_col = None
+                # 在同一行向前查找"杂质名称"或"名称"列
+                for offset in range(1, 6):
+                    prev_cell = ws.cell(row=row_idx, column=col_idx - offset)
+                    if prev_cell.value:
+                        prev_val = str(prev_cell.value).strip()
+                        if '杂质名称' in prev_val or prev_val == '名称':
+                            name_col = col_idx - offset
+                            break
+                    prev_cell_right = ws.cell(row=row_idx, column=col_idx + offset)
+                    if prev_cell_right.value:
+                        prev_val_r = str(prev_cell_right.value).strip()
+                        if '杂质名称' in prev_val_r:
+                            name_col = col_idx + offset
+                            break
+
                 results.append({
                     'content_col': col_idx,
                     'report_col': col_idx + 1,
+                    'name_col': name_col,
                     'start_row': row_idx + 1,
                 })
 
+    # 去重
     unique = []
     seen = set()
     for r in results:
@@ -407,39 +469,44 @@ def find_columns(ws) -> List[Dict]:
             seen.add(key)
             unique.append(r)
 
-    return unique if unique else [{'content_col': None, 'report_col': None, 'start_row': 1}]
+    return unique if unique else [{'content_col': None, 'report_col': None, 'name_col': None, 'start_row': 1}]
+
+
+def auto_detect_threshold_from_excel(ws) -> Optional[float]:
+    """从 Excel 表头区域自动识别报告限值"""
+    keywords = [
+        r'报告限[：:\s]*([\d.]+)%',
+        r'报告阈值[：:\s]*([\d.]+)%',
+        r'报告限值[：:\s]*([\d.]+)%',
+        r'定量限[：:\s]*([\d.]+)%',
+        r'report\s*limit[：:\s]*([\d.]+)%',
+        r'report\s*threshold[：:\s]*([\d.]+)%',
+    ]
+
+    for row in ws.iter_rows(min_row=1, max_row=35):
+        for cell in row:
+            if cell.value is None:
+                continue
+            text = str(cell.value).strip()
+            for kw_pattern in keywords:
+                m = re.search(kw_pattern, text, re.IGNORECASE)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                        if 0 < val < 100:
+                            print(f"  🔍 自动识别报告限: {val}% (来源: {cell.coordinate})")
+                            return val
+                    except ValueError:
+                        pass
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────
 # 主检查函数
 # ─────────────────────────────────────────────────────────────────
-def resolve_threshold(file_path: str, ws, cli_threshold: Optional[float]) -> float:
-    """
-    按优先级确定报告限阈值
-    优先级：CLI参数 > 配置文件 > Excel自动识别 > 默认0.05%
-    """
-    if cli_threshold is not None:
-        print(f"  🎯 命令行指定报告限: {cli_threshold}%")
-        return cli_threshold
-
-    config_threshold = load_threshold_from_config(file_path)
-    if config_threshold is not None:
-        return config_threshold
-
-    auto_threshold = auto_detect_threshold_from_excel(ws)
-    if auto_threshold is not None:
-        return auto_threshold
-
-    print(f"  📌 使用默认报告限: 0.05%")
-    return 0.05
-
-
 def check_file(file_path: str,
                batch_format: Optional[BatchFormatValidator] = None,
-               ignore_threshold: Optional[float] = None) -> Tuple[List[CheckError], float]:
-    """
-    检查文件，返回 (错误列表, 使用的阈值)
-    """
+               cli_threshold: Optional[float] = None) -> Tuple[List[CheckError], ThresholdResolver]:
     if batch_format is None:
         batch_format = BatchFormatValidator()
 
@@ -447,17 +514,36 @@ def check_file(file_path: str,
         wb = openpyxl.load_workbook(file_path, data_only=True)
     except Exception as e:
         print(f"❌ 无法打开文件：{e}")
-        return [], 0.05
+        return [], ThresholdResolver({})
 
     ws = wb.active
     sections = find_columns(ws)
-
-    # ── 确定阈值（优先级：CLI > 配置文件 > Excel自动识别 > 默认） ──
-    threshold = resolve_threshold(file_path, ws, ignore_threshold)
-
     resolver = MergedCellResolver(ws)
+
+    # ── 确定阈值解析器 ──
+    if cli_threshold is not None:
+        # CLI 全局阈值模式
+        config = {'default_threshold': cli_threshold, 'impurity_thresholds': {}}
+        threshold_resolver = ThresholdResolver(config)
+        print(f"  🎯 命令行指定报告限: {cli_threshold}%")
+    else:
+        config = load_config(file_path)
+        if not config:
+            auto_val = auto_detect_threshold_from_excel(ws)
+            config = {'default_threshold': auto_val or 0.05, 'impurity_thresholds': {}}
+            threshold_resolver = ThresholdResolver(config)
+            print(f"  📌 使用内置默认报告限: 0.05%")
+        else:
+            # 检查是否有项目级配置
+            resolver_for_proj = ThresholdResolver(config)
+            active_project, project_cfg = resolver_for_proj.get_active_project(file_path, ws)
+            threshold_resolver = ThresholdResolver(config, project_cfg)
+            _, info_lines = threshold_resolver.resolve(file_path, active_project)
+            for line in info_lines:
+                print(f"  {line}")
+
     batch_checker = BatchNumberChecker(batch_format)
-    ignore_checker = IgnoreTermChecker(threshold=threshold)
+    ignore_checker = IgnoreTermChecker(threshold_resolver)
 
     for row in ws.iter_rows():
         for cell in row:
@@ -475,7 +561,15 @@ def check_file(file_path: str,
                         if cell.value is not None:
                             report_cell = ws.cell(row=cell.row, column=cell.column + 1)
                             report_val = str(report_cell.value) if report_cell.value else ''
-                            ignore_checker.check(cell.value, report_val, cell_ref)
+
+                            # 获取杂质名称
+                            impurity_name = ''
+                            if section.get('name_col'):
+                                name_cell = ws.cell(row=cell.row, column=section['name_col'])
+                                if name_cell.value:
+                                    impurity_name = str(name_cell.value).strip()
+
+                            ignore_checker.check(cell.value, report_val, cell_ref, impurity_name)
 
     wb.close()
 
@@ -483,21 +577,22 @@ def check_file(file_path: str,
     errors.extend(batch_checker.final_check(resolver))
     errors.extend(ignore_checker.final_check(resolver))
 
-    return errors, threshold
+    return errors, threshold_resolver
 
 
 # ─────────────────────────────────────────────────────────────────
 # 输出格式化
 # ─────────────────────────────────────────────────────────────────
-def print_results(file_path: str, errors: List[CheckError], threshold: float):
+def print_results(file_path: str, errors: List[CheckError], resolver: ThresholdResolver):
     basename = os.path.basename(file_path)
 
     if not errors:
         print(f"📋 {basename}")
-        print(f"  ✅ 未发现明显错误（报告限: {threshold}%）")
+        print(f"  ✅ 未发现明显错误")
         return
 
-    header = f"📋 {basename}  |  报告限: {threshold}%\n  ⚠️ 发现 {len(errors)} 个潜在问题\n"
+    header = f"📋 {basename}\n"
+    header += f"  ⚠️ 发现 {len(errors)} 个潜在问题\n"
     header += "┌──────────┬──────────┬──────────────────────────────────────────────────────────────┐\n"
     header += "│ 类型     │ 位置     │ 问题                                                           │\n"
     header += "├──────────┼──────────┼──────────────────────────────────────────────────────────────┤"
@@ -515,26 +610,30 @@ def print_results(file_path: str, errors: List[CheckError], threshold: float):
 # ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description='HPLC有关物质检测数据明显错误检查器',
+        description='HPLC有关物质检测数据明显错误检查器（支持按杂质名称配置报告限）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 阈值确定优先级（从高到低）：
-  1. --threshold 参数
-  2. 被检文件同目录 impurity-checker.yaml
-  3. skill 目录 impurity-checker.yaml
-  4. Excel 表头自动识别（报告限：X%）
-  5. 默认值 0.05%%
+  1. --threshold 参数（全局单一阈值）
+  2. impurity-checker.yaml 配置文件
+  3. Excel 表头自动识别
+  4. 默认值 0.05%
 
 impurity-checker.yaml 示例：
-  report_threshold: 0.05   # 报告限，%% 可以省略
-  # 或
-  threshold: 0.05
+  # 默认报告限
+  default_threshold: 0.05
+
+  # 按杂质名称设置不同报告限
+  impurity_thresholds:
+    "杂质M": 0.03
+    "杂质N": 0.10
+    "其他单个杂质": 0.05
 '''
     )
     parser.add_argument('file', nargs='?', help='待检查的 Excel 文件路径')
     parser.add_argument('--threshold', '-t', type=float, default=None,
-                        help='指定报告限阈值（%%），例如 --threshold 0.05')
-    parser.add_argument('--version', '-v', action='version', version='%(prog)s 0.7.0')
+                        help='指定全局报告限阈值（%%），如 --threshold 0.05')
+    parser.add_argument('--version', '-v', action='version', version='%(prog)s 0.8.0')
 
     args = parser.parse_args()
 
@@ -547,8 +646,8 @@ impurity-checker.yaml 示例：
         print(f"❌ 文件不存在：{file_path}")
         sys.exit(1)
 
-    errors, threshold = check_file(file_path, ignore_threshold=args.threshold)
-    print_results(file_path, errors, threshold)
+    errors, resolver = check_file(file_path, cli_threshold=args.threshold)
+    print_results(file_path, errors, resolver)
 
 
 if __name__ == '__main__':

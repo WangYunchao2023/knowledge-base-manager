@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
-版本: 1.9.0
-日期: 2026-04-24
-
-更新说明：
-  - 扫描 PDF 的处理优先级调整：qwen2.5vl（主）→ Hybrid/EasyOCR（备）→ Fast（保底）
-  - 移除 `--force-qwen` 标志，扫描 PDF 自动优先使用 qwen2.5vl
-  - `--force-qwen` 重新定义为：跳过 Hybrid，直接用 qwen + Fast（禁用 Hybrid 作为备选）
+版本: 1.8.1
+日期: 2026-04-01
 
 架构说明（v1.8）：
   输入为 PDF  → 直接提取（位置信息 + 内容，PDF 限制：有 bbox/页码，表格数据可能稀疏）
@@ -36,7 +31,7 @@ JAVA_HOME = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64"
 HYBRID_SERVER_PID_FILE = "/tmp/opendataloader_hybrid_server.pid"
 HYBRID_SERVER_PORT = 5002
 
-# ---------- qwen2.5vl OCR 配置（Hybrid 失败时的备用） ----------
+# ---------- Qwen2.5VL OCR 配置 ----------
 QWEN_MODEL = "qwen2.5vl:latest"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
@@ -53,40 +48,214 @@ def check_qwen_available() -> bool:
             data = json.loads(resp.read())
             models = [m["name"] for m in data.get("models", [])]
             if any("qwen" in m.lower() and "vl" in m.lower() for m in models):
-                print(f"[INFO] 检测到 qwen2.5vl: {[m for m in models if 'qwen' in m.lower()]}")
+                print(f"[INFO] 检测到 qwen2.5vl 模型: {models}")
                 return True
     except Exception:
         pass
     return False
 
 
+def pdf_page_to_image(pdf_path: str, page_num: int, dpi: int = 200) -> bytes:
+    """将 PDF 指定页转为图片字节流（使用 pypdfium2）"""
+    import pypdfium2 as pdfium
+    doc = pdfium.PdfDocument(pdf_path)
+    page = doc.get_page(page_num)
+    pil_image = page.render(scale=dpi / 72.0).to_pil()
+    import io
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG", dpi=(dpi, dpi))
+    return buf.getvalue()
+
+
+def encode_image_to_base64(img_bytes: bytes) -> str:
+    import base64
+    return base64.b64encode(img_bytes).decode("ascii")
+
+
 QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识别这张 PDF 扫描页的内容，并按以下 JSON 格式返回：
+
 ```json
-{
+{{
   "page": <页码>,
   "blocks": [
-    {"type": "text", "content": "<识别的文本内容，保持原有换行和段落结构>"},
-    {"type": "table", "content": "<表格 Markdown 格式（如 | col1 | col2 |）>"}
+    {{
+      "type": "text",
+      "content": "<识别的文本内容，保持原有换行和段落结构>"
+    }},
+    {{
+      "type": "table",
+      "content": "<表格的 Markdown 格式，第一行为表头，用 | 分隔各列>\n<第二行为表头分隔线，如 |---|---|>\n<后续为数据行>"
+    }}
   ]
-}
+}}
 ```
-重要：只输出 JSON，text 块保持阅读顺序，table 块用 | 分隔，中英文都要准确。"""
+
+重要规则：
+1. text 块：严格按照阅读顺序输出，保持自然段落的完整性
+2. table 块：用标准 Markdown 表格格式（如 | col1 | col2 |）
+3. 如果页面同时有文字和表格，都要识别并分开输出
+4. 纯文字页面只需输出 text 块
+5. 不要输出任何解释文字，只输出 JSON
+6. 中文、英文、符号都要准确识别"""
+
+
+def qwen_ocr_image(image_path: str, output_dir: str, lang: str = "zh,en") -> dict:
+    """
+    使用本地 qwen2.5vl 对单张图片进行 OCR
+    支持: PNG, JPG, JPEG, WebP, BMP, TIFF
+    返回: {{"success": bool, "json_path": str, "md_path": str}}
+    """
+    import urllib.request
+    import base64
+    from PIL import Image
+    import io
+
+    print(f"[INFO] 使用 qwen2.5vl 对图片进行 OCR...")
+    basename = Path(image_path).stem
+    os.makedirs(output_dir, exist_ok=True)
+    json_path = Path(output_dir) / f"{basename}.json"
+    md_path = Path(output_dir) / f"{basename}.md"
+
+    try:
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        # 统一转为 PNG Bytes
+        try:
+            pil_img = Image.open(io.BytesIO(img_bytes))
+            buf = io.BytesIO()
+            pil_img.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
+        except Exception:
+            pass  # 已经是 PNG 或无法转换就用原始字节
+        img_b64 = base64.b64encode(img_bytes).decode("ascii")
+    except Exception as e:
+        print(f"[错误] 读取图片失败: {e}", file=sys.stderr)
+        return {"success": False}
+
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": QWEN_OCR_PROMPT.replace('PDF 扫描页', '图片'),
+                "images": [img_b64]
+            }
+        ],
+        "stream": False,
+        "options": {"temperature": 0.01}
+    }
+
+    try:
+        req = urllib.request.Request(
+            OLLAMA_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result_data = json.loads(resp.read())
+            content = result_data.get("message", {}).get("content", "").strip()
+    except Exception as e:
+        print(f"[错误] qwen2.5vl 请求失败: {e}", file=sys.stderr)
+        return {"success": False}
+
+    # 解析 JSON
+    if content.startswith("```"):
+        lines = content.split("\n")
+        content = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+        if content.endswith("```"):
+            content = content[:-3].strip()
+
+    try:
+        page_data = json.loads(content)
+    except json.JSONDecodeError:
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                page_data = json.loads(content[start:end])
+            except Exception:
+                print(f"[错误] JSON 解析失败: {content[:200]}", file=sys.stderr)
+                return {"success": False}
+        else:
+            print(f"[错误] 无法提取 JSON", file=sys.stderr)
+            return {"success": False}
+
+    # 构建元素列表
+    all_elements = []
+    total_tables = 0
+    total_paras = 0
+    for block in page_data.get("blocks", []):
+        btype = block.get("type", "")
+        bcontent = block.get("content", "").strip()
+        if not bcontent:
+            continue
+        if btype == "text":
+            total_paras += 1
+            all_elements.append({
+                "type": "paragraph",
+                "content": bcontent,
+                "page_number": 1,
+                "paragraph_index": total_paras
+            })
+        elif btype == "table":
+            total_tables += 1
+            all_elements.append({
+                "type": "table",
+                "content": bcontent,
+                "page_number": 1,
+                "table_index": total_tables,
+                "table_type": "markdown"
+            })
+
+    output_json = {
+        "doc_type": "image",
+        "source": "qwen2.5vl-ocr",
+        "total_pages": 1,
+        "traceability": {
+            "total_elements": len(all_elements),
+            "total_paragraphs": total_paras,
+            "total_tables": total_tables,
+            "ocr_model": QWEN_MODEL,
+        },
+        "elements": all_elements,
+        "flat_elements": all_elements,
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(output_json, f, ensure_ascii=False, indent=2)
+
+
+    md_lines = [f"# {basename}\n", "--- 第 1 页 ---\n"]
+    for elem in all_elements:
+        if elem["type"] == "paragraph":
+            md_lines.append(elem["content"])
+            md_lines.append("")
+        elif elem["type"] == "table":
+            md_lines.append(elem["content"])
+            md_lines.append("")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(md_lines))
+
+    print(f"[成功] 图片 OCR 完成: {len(all_elements)} 个元素")
+    return {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str, lang: str = "zh,en") -> dict:
     """
-    使用本地 qwen2.5vl 对扫描 PDF 进行 OCR（Hybrid 备用方案）
+    使用本地 qwen2.5vl 对扫描 PDF 进行 OCR
+    返回: {{ "success": bool, "json_path": str, "md_path": str }}
     """
     import urllib.request
+    import urllib.error
     import base64
     import io
 
-    print(f"[INFO] 使用 qwen2.5vl 进行扫描 PDF OCR...")
+    print(f"[INFO] 使用 qwen2.5vl 进行 OCR 识别...")
 
     try:
         import pypdfium2 as pdfium
     except ImportError:
-        print("[错误] pypdfium2 未安装，qwen2.5vl OCR 无法使用", file=sys.stderr)
+        print("[错误] pypdfium2 未安装，请运行: pip install pypdfium2", file=sys.stderr)
         return {"success": False}
 
     try:
@@ -109,25 +278,35 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str, lang: str = "zh,en") -> dict:
     for page_idx in range(total_pages):
         page_num = page_idx + 1
         try:
+            # 渲染页面为图片（72 DPI 平衡速度与质量）
             page = doc.get_page(page_idx)
             pil_img = page.render(scale=72 / 72.0).to_pil()
             buf = io.BytesIO()
-            pil_img.save(buf, format="JPEG", quality=75)
+            # JPEG 压缩减少体积，加速传输
+            pil_img.save(buf, format="JPEG", quality=85)
             img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception as e:
             print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
             continue
 
-        # 调用 Ollama（重试3次）
+        # 调用 Ollama qwen2.5vl
+        payload = {
+            "model": QWEN_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": QWEN_OCR_PROMPT,
+                    "images": [img_b64]
+                }
+            ],
+            "stream": False,
+            "options": {"temperature": 0.01}
+        }
+
+        # 调用 Ollama qwen2.5vl（失败自动重试3次）
         content = None
         for attempt in range(3):
             try:
-                payload = {
-                    "model": QWEN_MODEL,
-                    "messages": [{"role": "user", "content": QWEN_OCR_PROMPT, "images": [img_b64]}],
-                    "stream": False,
-                    "options": {"temperature": 0.01}
-                }
                 req = urllib.request.Request(
                     OLLAMA_URL,
                     data=json.dumps(payload).encode("utf-8"),
@@ -137,49 +316,73 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str, lang: str = "zh,en") -> dict:
                 with urllib.request.urlopen(req, timeout=180) as resp:
                     result_data = json.loads(resp.read())
                     content = result_data.get("message", {}).get("content", "").strip()
-                    break
+                    break  # 成功，跳出重试循环
             except Exception as e:
                 if attempt < 2:
+                    print(f"[警告] 第 {page_num} 页请求失败，重试 ({attempt+1}/3): {e}", file=sys.stderr)
                     import time
-                    time.sleep(2)
+                    time.sleep(2)  # 等待2秒后重试
                 else:
-                    print(f"[警告] 第 {page_num} 页 OCR 失败: {e}", file=sys.stderr)
+                    print(f"[警告] 第 {page_num} 页 OCR 请求失败: {e}", file=sys.stderr)
+                    continue
 
-        if not content:
+        if content is None:
             continue
 
         # 解析 JSON
-        try:
-            if content.startswith('```'):
-                lines = content.split('\n')
-                content = '\n'.join(lines[1:] if lines[0].startswith('```') else lines)
-                if content.endswith('```'):
-                    content = content[:-3].strip()
-            start, end = content.find('{'), content.rfind('}') + 1
-            if start >= 0 and end > start:
-                page_data = json.loads(content[start:end])
-            else:
-                continue
-        except Exception:
-            continue
+        if content.startswith("```"):
+            lines = content.split("\n")
+            content = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+            if content.endswith("```"):
+                content = content[:-3].strip()
 
+        try:
+            page_data = json.loads(content)
+        except json.JSONDecodeError:
+            # 尝试提取 JSON 部分
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                try:
+                    page_data = json.loads(content[start:end])
+                except Exception:
+                    print(f"[警告] 第 {page_num} 页 JSON 解析失败，跳过")
+                    continue
+            else:
+                print(f"[警告] 第 {page_num} 页无法提取 JSON，跳过")
+                continue
+
+        # 提取 blocks，构建元素列表
         for block in page_data.get("blocks", []):
             btype = block.get("type", "")
             bcontent = block.get("content", "").strip()
             if not bcontent:
                 continue
+
             if btype == "text":
                 total_paras += 1
-                all_elements.append({"type": "paragraph", "content": bcontent,
-                    "page_number": page_num, "paragraph_index": total_paras})
+                all_elements.append({
+                    "type": "paragraph",
+                    "content": bcontent,
+                    "page_number": page_num,
+                    "paragraph_index": total_paras
+                })
             elif btype == "table":
                 total_tables += 1
-                all_elements.append({"type": "table", "content": bcontent,
-                    "page_number": page_num, "table_index": total_tables})
+                all_elements.append({
+                    "type": "table",
+                    "content": bcontent,
+                    "page_number": page_num,
+                    "table_index": total_tables,
+                    "table_type": "markdown"
+                })
 
-        print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
+        print(f"[INFO] 第 {page_num}/{total_pages} 页完成" + (
+            f" → 含 {len([b for b in page_data.get('blocks', []) if b.get('type')=='text'])} 段文字, "
+            f"{len([b for b in page_data.get('blocks', []) if b.get('type')=='table'])} 张表格" if page_data.get('blocks') else ""
+        ))
 
-    # 保存结果
+    # 保存 JSON
     output_json = {
         "doc_type": "scanned_pdf",
         "source": "qwen2.5vl-ocr",
@@ -196,17 +399,29 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str, lang: str = "zh,en") -> dict:
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(output_json, f, ensure_ascii=False, indent=2)
 
+    # 生成 Markdown
     md_lines = [f"# {basename}\n"]
+    current_page = None
     for elem in all_elements:
         pg = elem.get("page_number")
-        md_lines.append(f"\n--- 第 {pg} 页 ---")
-        md_lines.append(elem["content"])
+        if pg != current_page:
+            md_lines.append(f"\n--- 第 {pg} 页 ---\n")
+            current_page = pg
+        if elem["type"] == "paragraph":
+            md_lines.append(elem["content"])
+            md_lines.append("")
+        elif elem["type"] == "table":
+            md_lines.append(elem["content"])
+            md_lines.append("")
+
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write('\n'.join(md_lines))
+        f.write("\n".join(md_lines))
 
-    print(f"[成功] qwen2.5vl OCR 完成: {len(all_elements)} 个元素")
-    return {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
+    print(f"[成功] qwen2.5vl OCR 完成: {len(all_elements)} 个元素 ({total_paras} 段, {total_tables} 张表格)")
+    return {"success": True, "json_path": str(json_path), "md_path": str(md_path), "total_pages": total_pages}
 
+
+# ---------- Word 转 PDF ----------
 def convert_word_to_pdf(docx_path: str, output_dir: str = "/tmp") -> str:
     """
     用 LibreOffice 将 Word 文档转换为 PDF
@@ -1231,7 +1446,6 @@ def run_convert(pdf_path: str, output_dir: str,
         auto_detect: 是否自动检测 PDF 类型
         force_mode: 强制模式 ("fast" | "hybrid")
         skip_server: 跳过启动 server（server 已由外部启动）
-        force_qwen: 跳过 Hybrid，直接用 qwen2.5vl + Fast（禁用 EasyOCR 作为备选）
     """
 
     result = {
@@ -1521,6 +1735,21 @@ def run_convert(pdf_path: str, output_dir: str,
         word_result["mode_used"] = "word-direct-fallback"
         return word_result
 
+    # ---- 图片文档：qwen2.5vl OCR ----
+    ext_lower = pdf_path.lower()
+    if (ext_lower.endswith(".png") or ext_lower.endswith(".jpg") or
+            ext_lower.endswith(".jpeg") or ext_lower.endswith(".webp") or
+            ext_lower.endswith(".bmp") or ext_lower.endswith(".tiff")):
+        print(f"[INFO] 检测到图片文档 → qwen2.5vl OCR 提取")
+        if not check_qwen_available():
+            print("[错误] qwen2.5vl 不可用，请确保 Ollama 运行中", file=sys.stderr)
+            return {"success": False, "mode_used": "image-qwen-unavailable"}
+        ocr_result = qwen_ocr_image(pdf_path, output_dir, lang="zh,en")
+        if ocr_result.get("success"):
+            return {"success": True, "mode_used": "qwen2.5vl-ocr",
+                    "files_created": [ocr_result["json_path"], ocr_result["md_path"]]}
+        return {"success": False, "mode_used": "image-failed"}
+
     # ---- PDF 处理 ----
     # pdf_path 已在参数中传入，继续使用
 
@@ -1556,78 +1785,67 @@ def run_convert(pdf_path: str, output_dir: str,
     print(f"\n[INFO] 使用模式: {'Fast (本地)' if detection['type'] == 'digital' else 'Hybrid (AI增强)'}")
     print(f"[INFO] 执行命令: {' '.join(cmd)}")
 
-    # ============================================================
-    # 扫描/混合 PDF：优先 qwen2.5vl → Hybrid(EasyOCR) → Fast
-    # ============================================================
-    if detection["type"] in ("scanned", "mixed") and not skip_server:
+    # 强制 qwen2.5vl OCR 模式
+    if force_qwen and check_qwen_available():
+        print("[INFO] 强制使用 qwen2.5vl OCR 模式", file=sys.stderr)
         ocr_lang = detection.get("lang", "auto") or "zh,en"
         if ocr_lang == "auto":
             ocr_lang = "zh,en"
+        ocr_result = qwen_ocr_pdf(
+            pdf_path=pdf_path,
+            output_dir=output_dir,
+            lang=ocr_lang
+        )
+        if ocr_result.get("success"):
+            result["success"] = True
+            result["mode_used"] = "qwen2.5vl-ocr"
+            result["files_created"] = [ocr_result["json_path"], ocr_result["md_path"]]
+            print(f"[成功] 输出已保存到: {output_dir}")
+            return result
+        else:
+            print("[错误] qwen2.5vl OCR 失败，尝试其他模式...", file=sys.stderr)
 
-        # --- 第一选择：qwen2.5vl VLM（最强 OCR + 表格理解）---
-        if check_qwen_available():
-            print("[INFO] 扫描 PDF，优先使用 qwen2.5vl OCR...", file=sys.stderr)
-            ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=ocr_lang)
-            if ocr_result.get("success"):
-                result["success"] = True
-                result["mode_used"] = "qwen2.5vl-ocr"
-                result["files_created"] = [ocr_result["json_path"], ocr_result["md_path"]]
-                print(f"[成功] qwen2.5vl OCR 完成，输出: {output_dir}")
-                return result
+    # 启动 Hybrid server（如果需要且未运行）
+    if detection["type"] != "digital" and not skip_server:
+        # 准备 server 参数
+        force_ocr = detection["type"] in ("scanned", "mixed")
+        ocr_lang = detection.get("lang", "auto")
+        if ocr_lang == "auto":
+            ocr_lang = "zh,en"  # 默认中英文
+
+        enrich_formula = detection.get("has_formulas", False)
+        enrich_picture = detection.get("has_charts", False)
+
+        server_ok = start_hybrid_server(
+            force_ocr=force_ocr,
+            ocr_lang=ocr_lang,
+            enrich_formula=enrich_formula,
+            enrich_picture=enrich_picture
+        )
+
+        if not server_ok:
+            # 尝试 qwen2.5vl OCR（备选方案）
+            print("[INFO] Hybrid server 不可用，尝试 qwen2.5vl OCR...", file=sys.stderr)
+            if check_qwen_available():
+                print("[INFO] 使用 qwen2.5vl 进行扫描 PDF OCR", file=sys.stderr)
+                ocr_result = qwen_ocr_pdf(
+                    pdf_path=pdf_path,
+                    output_dir=output_dir,
+                    lang=ocr_lang
+                )
+                if ocr_result.get("success"):
+                    result["success"] = True
+                    result["mode_used"] = "qwen2.5vl-ocr"
+                    result["files_created"] = [ocr_result["json_path"], ocr_result["md_path"]]
+                    print(f"[成功] 输出已保存到: {output_dir}")
+                    return result
+                else:
+                    print("[错误] qwen2.5vl OCR 失败，尝试降级到 Fast 模式...", file=sys.stderr)
             else:
-                print("[警告] qwen2.5vl OCR 失败，切换到 Hybrid/EasyOCR...", file=sys.stderr)
-        else:
-            print("[INFO] qwen2.5vl 不可用，使用 Hybrid/EasyOCR...", file=sys.stderr)
-
-        # --- 第二选择：Hybrid server（EasyOCR + docling AI 增强）---
-        # 除非用户明确指定 --force-qwen（跳过 Hybrid，直接降级 Fast）
-        if not force_qwen:
-            force_ocr = detection["type"] in ("scanned", "mixed")
-            enrich_formula = detection.get("has_formulas", False)
-            enrich_picture = detection.get("has_charts", False)
-
-            server_ok = start_hybrid_server(
-                force_ocr=force_ocr,
-                ocr_lang=ocr_lang,
-                enrich_formula=enrich_formula,
-                enrich_picture=enrich_picture
-            )
-
-            if server_ok:
-                # 执行 Hybrid 提取
-                cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-                result["command"] = " ".join(cmd)
-                env = os.environ.copy()
-                env["JAVA_HOME"] = JAVA_HOME
-                env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-
-                try:
-                    proc = subprocess.run(
-                        cmd, capture_output=True, text=True, env=env, timeout=300
-                    )
-                    result["stdout"] = proc.stdout
-                    result["stderr"] = proc.stderr
-                    result["returncode"] = proc.returncode
-
-                    if proc.returncode == 0:
-                        result["success"] = True
-                        result["mode_used"] = "hybrid-easyocr"
-                        print(f"[成功] Hybrid/EasyOCR 完成，输出: {output_dir}")
-                        return result
-                    else:
-                        print(f"[警告] Hybrid/EasyOCR 返回码 {proc.returncode}，降级 Fast...", file=sys.stderr)
-                except subprocess.TimeoutExpired:
-                    print("[警告] Hybrid/EasyOCR 超时，降级 Fast...", file=sys.stderr)
-                except Exception as e:
-                    print(f"[警告] Hybrid/EasyOCR 异常: {e}，降级 Fast...", file=sys.stderr)
-        else:
-            print("[INFO] --force-qwen 模式，跳过 Hybrid，直接降级 Fast...", file=sys.stderr)
-
-        # --- 最后保底：Fast 本地模式 ---
-        print("[INFO] 降级到 Fast 本地模式...", file=sys.stderr)
-        detection["type"] = "digital"
-        cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-        result["command"] = " ".join(cmd)
+                print("[错误] Hybrid server 启动失败，且未检测到 qwen2.5vl，尝试降级到 Fast 模式...", file=sys.stderr)
+            detection["type"] = "digital"
+            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
+            result["command"] = " ".join(cmd)
 
     # 执行
     env = os.environ.copy()
@@ -1688,7 +1906,9 @@ def main():
     parser.add_argument("--detect-only", action="store_true",
                         help="仅检测 PDF 类型，不执行转换")
     parser.add_argument("--force-qwen", action="store_true",
-                        help="跳过 Hybrid，直接用 qwen2.5vl + Fast（禁用 EasyOCR 作为备选）")
+                        help="强制使用 qwen2.5vl 做 OCR（扫描PDF和图片推荐）")
+    parser.add_argument("--image-dpi", type=int, default=200,
+                        help="PDF/图片渲染 DPI（默认 200）")
 
     args = parser.parse_args()
 
@@ -1704,6 +1924,8 @@ def main():
             info = {"type": "word", "format": "docx/doc"}
         elif ext.endswith(".xlsx") or ext.endswith(".xls"):
             info = {"type": "excel", "format": "xlsx/xls"}
+        elif ext.endswith(".png") or ext.endswith(".jpg") or ext.endswith(".jpeg") or ext.endswith(".webp") or ext.endswith(".bmp") or ext.endswith(".tiff"):
+            info = {"type": "image", "format": ext}
         else:
             info = detect_pdf_type(args.input)
         print(json.dumps(info, ensure_ascii=False, indent=2))
