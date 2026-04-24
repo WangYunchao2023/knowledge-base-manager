@@ -331,6 +331,30 @@ def scan_for_new_files(scan_dirs, indexed_ids):
 
 # ---- 单文件处理 ----
 
+def compute_content_hash(md_path):
+    """对 .md 文件内容计算 SHA256 哈希（用于内容级去重）"""
+    if not os.path.exists(md_path):
+        return None
+    with open(md_path, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def check_duplicate_by_hash(md_path, index_data):
+    """
+    检查内容是否与已有文档重复。
+    返回 (is_duplicate, existing_doc)  — is_duplicate=True 时 existing_doc 为冲突条目。
+    """
+    new_hash = compute_content_hash(md_path)
+    if not new_hash:
+        return False, None
+    for doc in index_data.get("documents", []):
+        stored_hash = doc.get("content_hash")
+        if stored_hash and stored_hash == new_hash:
+            return True, doc
+    return False, None
+
+
 def process_new_file(f, index_data):
     log(f"处理文件: {f['name']}", "📄")
     meta = parse_filename_for_meta(f['name'])
@@ -371,7 +395,16 @@ def process_new_file(f, index_data):
         else:
             log(f"  → 提取失败: {result}", "⚠️")
     
+    # 2.5 内容哈希去重检查（基于 .md 纯文本内容）
+    if os.path.exists(extracted_md):
+        is_dup, dup_doc = check_duplicate_by_hash(extracted_md, index_data)
+        if is_dup:
+            log(f"  ⚠️  内容与已有文档重复，已跳过入库", "🔄")
+            print(f"  重复文档: {dup_doc['title']}（{dup_doc.get('issue_date', '无日期')}）")
+            return None  # 跳过入库
+    
     # 3. 构建索引条目（路径为相对路径）
+    content_hash = compute_content_hash(extracted_md) if os.path.exists(extracted_md) else None
     index_entry = {
         "id": meta['id'],
         "title": meta['title'],
@@ -383,6 +416,7 @@ def process_new_file(f, index_data):
             "type": meta['drug_types']
         },
         "tags": meta['tags'],
+        "content_hash": content_hash,
         "paths": {
             "raw": os.path.join(rel_prefix, DIR_RAW, f['name']),
             "markdown": os.path.join(rel_prefix, DIR_EXTRACTED, extracted_base + ".md"),
