@@ -22,13 +22,20 @@ from pathlib import Path
 
 # ============ 配置区 ============
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
+CATEGORY_SUBDIRS = ["化学药", "中药", "生物制品", "通用"]
+
 def get_all_extracted_dirs():
-    """获取所有含有供AI用信息的目录（兼容单一大目录和多分类子目录）"""
+    """获取所有含有供AI用信息的目录（遍历所有分类下的所有二级子目录）"""
     dirs = []
-    for cat in ["化学药", "中药", "生物制品", "通用"]:
-        d = os.path.join(KB_ROOT, cat, "稳定性", "供AI用信息")
-        if os.path.isdir(d):
-            dirs.append(d)
+    for cat in CATEGORY_SUBDIRS:
+        cat_path = os.path.join(KB_ROOT, cat)
+        if not os.path.isdir(cat_path):
+            continue
+        for subdir in os.listdir(cat_path):
+            p = os.path.join(cat_path, subdir, "供AI用信息")
+            if os.path.isdir(p) and p not in dirs:
+                dirs.append(p)
+    # 旧结构兼容
     old = os.path.join(KB_ROOT, "稳定性", "供AI用信息")
     if os.path.isdir(old) and old not in dirs:
         dirs.append(old)
