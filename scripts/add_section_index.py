@@ -17,7 +17,7 @@ from pathlib import Path
 
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
 INDEX_FILE = os.path.join(KB_ROOT, "guidance_index.json")
-MD_DIR = os.path.join(KB_ROOT, "稳定性指导原则", "供AI用信息")
+MD_DIR = os.path.join(KB_ROOT, "稳定性", "供AI用信息")
 
 
 def extract_sections(md_path):
