@@ -77,139 +77,177 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
 重要：只输出 JSON，text 块保持阅读顺序，table 块用 | 分隔，中英文都要准确。"""
 
 
-def qwen_ocr_pdf(pdf_path: str, output_dir: str, lang: str = "zh,en") -> dict:
+def qwen_ocr_pdf(pdf_path: str, output_dir: str,
+               lang: str = "zh,en",
+               pages_to_skip: list = None) -> dict:
     """
-    使用本地 qwen2.5vl 对扫描 PDF 进行 OCR（Hybrid 备用方案）
+    使用本地 qwen2.5vl 对扫描 PDF 进行 OCR
+    自动协调 VRAM：OCR 前让出显存，OCR 后恢复 LLM
+
+    pages_to_skip: 数字页列表（只跳过，不 OCR），节省时间
     """
     import urllib.request
     import base64
     import io
 
-    print(f"[INFO] 使用 qwen2.5vl 进行扫描 PDF OCR...")
+    _vram_acquired = False
+    _vm = None
+    _result = {"success": False}
 
+    # ---- VRAM 协调（放在最外层 try/finally 确保恢复）----
     try:
-        import pypdfium2 as pdfium
-    except ImportError:
-        print("[错误] pypdfium2 未安装，qwen2.5vl OCR 无法使用", file=sys.stderr)
-        return {"success": False}
-
-    try:
-        doc = pdfium.PdfDocument(pdf_path)
-        total_pages = len(doc)
-        print(f"[INFO] PDF 共 {total_pages} 页，开始逐页 OCR...")
-    except Exception as e:
-        print(f"[错误] 无法读取 PDF: {e}", file=sys.stderr)
-        return {"success": False}
-
-    basename = Path(pdf_path).stem
-    os.makedirs(output_dir, exist_ok=True)
-    json_path = Path(output_dir) / f"{basename}.json"
-    md_path = Path(output_dir) / f"{basename}.md"
-
-    all_elements = []
-    total_tables = 0
-    total_paras = 0
-
-    for page_idx in range(total_pages):
-        page_num = page_idx + 1
         try:
-            page = doc.get_page(page_idx)
-            pil_img = page.render(scale=72 / 72.0).to_pil()
-            buf = io.BytesIO()
-            pil_img.save(buf, format="JPEG", quality=75)
-            img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        except Exception as e:
-            print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
-            continue
-
-        # 调用 Ollama（重试3次）
-        content = None
-        for attempt in range(3):
-            try:
-                payload = {
-                    "model": QWEN_MODEL,
-                    "messages": [{"role": "user", "content": QWEN_OCR_PROMPT, "images": [img_b64]}],
-                    "stream": False,
-                    "options": {"temperature": 0.01}
-                }
-                req = urllib.request.Request(
-                    OLLAMA_URL,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=180) as resp:
-                    result_data = json.loads(resp.read())
-                    content = result_data.get("message", {}).get("content", "").strip()
-                    break
-            except Exception as e:
-                if attempt < 2:
-                    import time
-                    time.sleep(2)
-                else:
-                    print(f"[警告] 第 {page_num} 页 OCR 失败: {e}", file=sys.stderr)
-
-        if not content:
-            continue
-
-        # 解析 JSON
-        try:
-            if content.startswith('```'):
-                lines = content.split('\n')
-                content = '\n'.join(lines[1:] if lines[0].startswith('```') else lines)
-                if content.endswith('```'):
-                    content = content[:-3].strip()
-            start, end = content.find('{'), content.rfind('}') + 1
-            if start >= 0 and end > start:
-                page_data = json.loads(content[start:end])
+            sys.path.insert(0, "/home/wangyc/.openclaw/scripts")
+            from vram_manager import VMgr
+            _vm = VMgr()
+            if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                _vram_acquired = True
+                print(f"[INFO] VRAM 已腾出，qwen2.5vl 可用", file=sys.stderr)
             else:
+                print(f"[警告] VRAM 协调失败，继续尝试 OCR...", file=sys.stderr)
+        except Exception as e:
+            print(f"[警告] VRAM 协调异常: {e}，继续 OCR...", file=sys.stderr)
+
+        # ---- 正式 OCR 处理 ----
+        print(f"[INFO] 使用 qwen2.5vl 进行扫描 PDF OCR...")
+
+        try:
+            import pypdfium2 as pdfium
+        except ImportError:
+            print("[错误] pypdfium2 未安装，qwen2.5vl OCR 无法使用", file=sys.stderr)
+            return _result
+
+        try:
+            doc = pdfium.PdfDocument(pdf_path)
+            total_pages = len(doc)
+            print(f"[INFO] PDF 共 {total_pages} 页，开始逐页 OCR...")
+        except Exception as e:
+            print(f"[错误] 无法读取 PDF: {e}", file=sys.stderr)
+            return _result
+
+        basename = Path(pdf_path).stem
+        os.makedirs(output_dir, exist_ok=True)
+        json_path = Path(output_dir) / f"{basename}.json"
+        md_path = Path(output_dir) / f"{basename}.md"
+
+        all_elements = []
+        total_tables = 0
+        total_paras = 0
+
+        skip_set = set(pages_to_skip or [])
+        for page_idx in range(total_pages):
+            page_num = page_idx + 1
+            if page_num in skip_set:
+                continue  # 跳过数字页，只 OCR 扫描页
+            try:
+                page = doc.get_page(page_idx)
+                pil_img = page.render(scale=72 / 72.0).to_pil()
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=75)
+                img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            except Exception as e:
+                print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
                 continue
-        except Exception:
-            continue
 
-        for block in page_data.get("blocks", []):
-            btype = block.get("type", "")
-            bcontent = block.get("content", "").strip()
-            if not bcontent:
+            # 调用 Ollama（重试3次）
+            content = None
+            for attempt in range(3):
+                try:
+                    payload = {
+                        "model": QWEN_MODEL,
+                        "messages": [{"role": "user", "content": QWEN_OCR_PROMPT, "images": [img_b64]}],
+                        "stream": False,
+                        "options": {"temperature": 0.01}
+                    }
+                    req = urllib.request.Request(
+                        OLLAMA_URL,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=180) as resp:
+                        result_data = json.loads(resp.read())
+                        content = result_data.get("message", {}).get("content", "").strip()
+                        break
+                except Exception as e:
+                    if attempt < 2:
+                        import time
+                        time.sleep(2)
+                    else:
+                        print(f"[警告] 第 {page_num} 页 OCR 失败: {e}", file=sys.stderr)
+
+            if not content:
                 continue
-            if btype == "text":
-                total_paras += 1
-                all_elements.append({"type": "paragraph", "content": bcontent,
-                    "page_number": page_num, "paragraph_index": total_paras})
-            elif btype == "table":
-                total_tables += 1
-                all_elements.append({"type": "table", "content": bcontent,
-                    "page_number": page_num, "table_index": total_tables})
 
-        print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
+            # 解析 JSON
+            try:
+                if content.startswith('```'):
+                    lines = content.split('\n')
+                    content = '\n'.join(lines[1:] if lines[0].startswith('```') else lines)
+                    if content.endswith('```'):
+                        content = content[:-3].strip()
+                start, end = content.find('{'), content.rfind('}') + 1
+                if start >= 0 and end > start:
+                    page_data = json.loads(content[start:end])
+                else:
+                    continue
+            except Exception:
+                continue
 
-    # 保存结果
-    output_json = {
-        "doc_type": "scanned_pdf",
-        "source": "qwen2.5vl-ocr",
-        "total_pages": total_pages,
-        "traceability": {
-            "total_elements": len(all_elements),
-            "total_paragraphs": total_paras,
-            "total_tables": total_tables,
-            "ocr_model": QWEN_MODEL,
-        },
-        "elements": all_elements,
-        "flat_elements": all_elements,
-    }
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(output_json, f, ensure_ascii=False, indent=2)
+            for block in page_data.get("blocks", []):
+                btype = block.get("type", "")
+                bcontent = block.get("content", "").strip()
+                if not bcontent:
+                    continue
+                if btype == "text":
+                    total_paras += 1
+                    all_elements.append({"type": "paragraph", "content": bcontent,
+                        "page_number": page_num, "paragraph_index": total_paras})
+                elif btype == "table":
+                    total_tables += 1
+                    all_elements.append({"type": "table", "content": bcontent,
+                        "page_number": page_num, "table_index": total_tables})
 
-    md_lines = [f"# {basename}\n"]
-    for elem in all_elements:
-        pg = elem.get("page_number")
-        md_lines.append(f"\n--- 第 {pg} 页 ---")
-        md_lines.append(elem["content"])
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write('\n'.join(md_lines))
+            print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
 
-    print(f"[成功] qwen2.5vl OCR 完成: {len(all_elements)} 个元素")
-    return {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
+        # 保存结果
+        output_json = {
+            "doc_type": "scanned_pdf",
+            "source": "qwen2.5vl-ocr",
+            "total_pages": total_pages,
+            "traceability": {
+                "total_elements": len(all_elements),
+                "total_paragraphs": total_paras,
+                "total_tables": total_tables,
+                "ocr_model": QWEN_MODEL,
+            },
+            "elements": all_elements,
+            "flat_elements": all_elements,
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(output_json, f, ensure_ascii=False, indent=2)
+
+        md_lines = [f"# {basename}\n"]
+        for elem in all_elements:
+            pg = elem.get("page_number")
+            md_lines.append(f"\n--- 第 {pg} 页 ---")
+            md_lines.append(elem["content"])
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write('\n'.join(md_lines))
+
+        print(f"[成功] qwen2.5vl OCR 完成: {len(all_elements)} 个元素")
+        _result = {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
+
+    finally:
+        # VRAM 恢复（无论成功还是失败都要恢复）
+        if _vram_acquired and _vm is not None:
+            try:
+                _vm.release_and_restore()
+                print(f"[INFO] VRAM 已恢复", file=sys.stderr)
+            except Exception as e:
+                print(f"[警告] VRAM 恢复异常: {e}", file=sys.stderr)
+
+    return _result
 
 def convert_word_to_pdf(docx_path: str, output_dir: str = "/tmp") -> str:
     """
@@ -1399,119 +1437,29 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
     except Exception as e:
         print(f"[警告] opendataloader digital 页异常: {e}", file=sys.stderr)
 
-    # -- scanned 页：qwen2.5vl OCR --
+    # -- scanned 页：qwen2.5vl OCR（VRAM 让出在 qwen_ocr_pdf 内部处理）--
     print(f"[Step 3/4] scanned 页 OCR: {scanned_pages}")
 
-    # 提取 scanned 页的图像
-    try:
-        import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(pdf_path)
-        total_pages = len(doc)
+    # 用 qwen_ocr_pdf 处理 scanned 页，它自带 VRAM 协调
+    ocr_call_result = qwen_ocr_pdf(
+        pdf_path=pdf_path,
+        output_dir=tmp_scanned_dir,
+        lang=lang,
+        pages_to_skip=digital_pages,  # 跳过数字页，只 OCR 扫描页
+    )
 
-        all_ocr_kids = []
-        total_tables = 0
-        total_paras = 0
-
-        for page_idx in scanned_pages:
-            page_num = page_idx
-            page_idx_0 = page_idx - 1  # 0-indexed
-            if page_idx_0 < 0 or page_idx_0 >= total_pages:
-                continue
-
-            try:
-                page = doc.get_page(page_idx_0)
-                pil_img = page.render(scale=72 / 72.0).to_pil()
-                buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=75)
-                img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            except Exception as e:
-                print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
-                continue
-
-            # 调用 qwen2.5vl OCR
-            import urllib.request
-            content = None
-            for attempt in range(3):
-                try:
-                    payload = {
-                        "model": QWEN_MODEL,
-                        "messages": [{"role": "user", "content": QWEN_OCR_PROMPT, "images": [img_b64]}],
-                        "stream": False,
-                        "options": {"temperature": 0.01}
-                    }
-                    req = urllib.request.Request(
-                        OLLAMA_URL,
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req, timeout=180) as resp:
-                        result_data = json.loads(resp.read())
-                        content = result_data.get("message", {}).get("content", "").strip()
-                        break
-                except Exception as e:
-                    if attempt < 2:
-                        import time; time.sleep(2)
-                    else:
-                        print(f"[警告] 第 {page_num} 页 OCR 失败: {e}", file=sys.stderr)
-
-            if not content:
-                continue
-
-            # 解析 JSON
-            try:
-                if content.startswith('```'):
-                    lines = content.split('\n')
-                    content = '\n'.join(lines[1:] if lines[0].startswith('```') else lines)
-                    if content.endswith('```'):
-                        content = content[:-3].strip()
-                start, end = content.find('{'), content.rfind('}') + 1
-                if start >= 0 and end > start:
-                    page_data = json.loads(content[start:end])
-                else:
-                    continue
-            except Exception:
-                continue
-
-            for block in page_data.get("blocks", []):
-                btype = block.get("type", "")
-                bcontent = block.get("content", "").strip()
-                if not bcontent:
-                    continue
-                if btype == "text":
-                    total_paras += 1
-                    all_ocr_kids.append({
-                        "type": "paragraph",
-                        "content": bcontent,
-                        "page_number": page_num,
-                        "paragraph_index": total_paras,
-                        "_source": "qwen2.5vl-ocr",
-                    })
-                elif btype == "table":
-                    total_tables += 1
-                    all_ocr_kids.append({
-                        "type": "table",
-                        "content": bcontent,
-                        "page_number": page_num,
-                        "table_index": total_tables,
-                        "_source": "qwen2.5vl-ocr",
-                    })
-
-            print(f"[      ] 第 {page_idx}/{len(scanned_pages)} 个扫描页 OCR 完成")
-
-        ocr_result = {
-            "doc_type": "scanned_pdf",
-            "source": "qwen2.5vl-ocr",
-            "kids": all_ocr_kids,
-            "total_tables": total_tables,
-            "total_paragraphs": total_paras,
-            "lang": lang,
-        }
-
-    except ImportError:
-        print("[警告] pypdfium2 未安装，无法渲染扫描页图像", file=sys.stderr)
-    except Exception as e:
-        print(f"[警告] 扫描页 OCR 过程异常: {e}", file=sys.stderr)
+    # 加载 OCR 结果的 JSON（qwen_ocr_pdf 只返回文件路径）
+    ocr_result = {}
+    if ocr_call_result.get("success") and ocr_call_result.get("json_path"):
+        try:
+            with open(ocr_call_result["json_path"], encoding="utf-8") as f:
+                ocr_json = json.load(f)
+                # 转换为 kids 结构（兼容 merge_per_page_results）
+                ocr_result["kids"] = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
+                ocr_result["total_tables"] = ocr_json.get("traceability", {}).get("total_tables", 0)
+                ocr_result["total_paragraphs"] = ocr_json.get("traceability", {}).get("total_paragraphs", 0)
+        except Exception as e:
+            print(f"[警告] 加载 OCR 结果失败: {e}", file=sys.stderr)
 
     # Step 4: 合并结果
     print(f"[Step 4/4] 合并 digital + OCR 结果...")
