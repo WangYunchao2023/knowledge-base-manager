@@ -69,15 +69,40 @@ CATEGORY_SUBDIRS = {
 }
 
 # 二级分类子目录（在每个一级分类下创建）
+# 顺序：按匹配优先级排列（先匹配的先生效）
 GUIDANCE_SUBDIRS = [
     "稳定性指导原则",
-    "质量标准",
+    "临床研究",
     "药理学",
     "毒理学",
-    "临床研究",
+    "质量标准",
     "申报注册",
     "其他",
 ]
+
+# 关键词 → 二级子目录 映射（按优先级）
+SUBDIR_KEYWORDS = [
+    ("稳定性", "稳定性指导原则"),
+    ("临床研发", "临床研究"),
+    ("临床试验", "临床研究"),
+    ("以患者为中心", "临床研究"),
+    ("药理学", "药理学"),
+    ("毒理学", "毒理学"),
+    ("质量标准", "质量标准"),
+    ("申报", "申报注册"),
+    ("注册", "申报注册"),
+    ("注射剂", "稳定性指导原则"),  # 注射剂常涉及配伍稳定性
+    ("配伍", "稳定性指导原则"),
+    ("原料药", "稳定性指导原则"),
+    ("制剂", "稳定性指导原则"),
+]
+
+def _match_subdir(title):
+    """根据文件名关键词匹配二级子目录（返回第一个匹配的）"""
+    for kw, subdir in SUBDIR_KEYWORDS:
+        if kw in title:
+            return subdir
+    return None  # 不匹配任何已知关键词
 # ==============================
 
 def log(msg, emoji="📋"):
@@ -93,10 +118,21 @@ def get_category_dir(category):
 def get_guidance_subdir(title, category):
     """
     根据文档标题自动判断二级子目录。
-    目前默认放「稳定性指导原则」，后续可扩展按文件名关键词分流。
+    1. 先用关键词匹配（SUBDIR_KEYWORDS）
+    2. 若匹配到的子目录不在当前 GUIDANCE_SUBDIRS 中，动态追加
+    3. 若无匹配，返回「其他」
     """
-    # 目前默认都放稳定性指导原则
-    return "稳定性指导原则"
+    # 关键词匹配
+    matched = _match_subdir(title)
+    if matched is None:
+        matched = "其他"
+    
+    # 动态追加：如果匹配到的子目录不在已知列表中，自动追加
+    if matched not in GUIDANCE_SUBDIRS:
+        GUIDANCE_SUBDIRS.append(matched)
+        log(f"🆕 发现新二级目录类型「{matched}」，已自动追加到配置", "📁")
+    
+    return matched
 
 
 def resolve_destination_dir(meta):
@@ -108,14 +144,48 @@ def resolve_destination_dir(meta):
       一级: 化学药
       二级: 稳定性指导原则
       相对路径前缀: 化学药/稳定性指导原则/
+    
+    注意：动态创建的二级子目录（如「临床研究」）
+    会在首次发现时自动在所有一级分类下创建对应目录。
     """
     cat_dir = get_category_dir(meta["category"])
     guidance_dir = get_guidance_subdir(meta["title"], meta["category"])
+    
+    # 若发现新二级子目录，立即在所有分类下创建其目录结构
+    _ensure_new_subdir_all_categories(KB_ROOT, guidance_dir)
     
     # 相对 KB_ROOT 的路径前缀
     rel_prefix = os.path.join(cat_dir, guidance_dir)
     
     return cat_dir, guidance_dir, rel_prefix
+
+
+def _ensure_new_subdir_all_categories(kb_root, new_subdir):
+    """
+    在所有一级分类目录下创建新二级子目录的完整结构（原始文件/ + 供AI用信息/）。
+    仅在新二级子目录首次出现时调用。
+    """
+    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jobs", "subdirs.json")
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    
+    known = {}
+    if os.path.exists(state_file):
+        try:
+            known = json.load(open(state_file))
+        except:
+            known = {}
+    
+    if new_subdir in known:
+        return  # 已处理过
+    
+    known[new_subdir] = True
+    json.dump(known, open(state_file, "w"), ensure_ascii=False)
+    
+    for cat in CATEGORY_SUBDIRS.values():
+        for sub in [DIR_RAW, DIR_EXTRACTED]:
+            path = os.path.join(kb_root, cat, new_subdir, sub)
+            os.makedirs(path, exist_ok=True)
+    log(f"🆕 自动创建新二级目录「{new_subdir}」（原始文件/ + 供AI用信息/）", "📁")
 
 
 def ensure_category_dirs(kb_root, category):
