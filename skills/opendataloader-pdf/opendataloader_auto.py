@@ -1365,40 +1365,40 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
     if not digital_pages and not scanned_pages:
         print("[错误] 无法读取 PDF 页", file=sys.stderr)
         return result
-
-    # 全部是 digital 页 → qwen2.5vl（保表格结构），opendataloader 作备选
+    # 全部是 digital 页 → qwen2.5vl（保表格结构），队列等待VRAM
     if not scanned_pages:
-        # 检查 VRAM 是否足够运行 qwen2.5vl（需要 ~18GB free）
-        _vram_ok = False
+        print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
+
+        # 队列等待VRAM（最多等5分钟，每10秒轮询）
+        _got_vram = False
+        _vm = None
         try:
             sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
             from vram_manager import VMgr
             _vm = VMgr()
-            _status = _vm.status()
-            _vram_free = _status.get("vram_free_mb", 0)
-            _vram_ok = _vram_free >= 18000  # 至少 18GB free 才尝试
-            print(f"[      ] VRAM free: {_vram_free}MB, {'足够' if _vram_ok else '不足'} → {'qwen2.5vl' if _vram_ok else 'opendataloader'}")
-        except Exception:
-            pass  # 无法检测，降级到 opendataloader
+            import time as _time
+            _waited = 0
+            while _waited < 300:
+                _status = _vm.status()
+                _vram_free = _status.get("vram_free_mb", 0)
+                _state = _status.get("state", "?")
+                if _vram_free >= 18000:
+                    # 尝试获取VRAM
+                    if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                        _got_vram = True
+                        break
+                if _waited == 0:
+                    print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
+                _time.sleep(10)
+                _waited += 10
+                if _waited % 30 == 0:
+                    print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
+            if not _got_vram and _waited > 0:
+                print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
+        except Exception as _e:
+            print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
 
-        if not _vram_ok:
-            print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，VRAM 不足 → opendataloader fast（表格结构可能丢失）...")
-            detection = {"type": "digital", "lang": lang, "total_pages": total}
-            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-            env = os.environ.copy()
-            env["JAVA_HOME"] = JAVA_HOME
-            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-                if proc.returncode == 0:
-                    result["success"] = True
-                    result["mode_used"] = "per-page-digital-only"
-                    return result
-            except Exception as e:
-                print(f"[警告] opendataloader 失败: {e}", file=sys.stderr)
-            return result
-
-        print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，用 qwen2.5vl 保表格结构...")
+        # 执行 qwen2.5vl OCR
         ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
         if ocr_result.get("success") and ocr_result.get("json_path"):
             try:
@@ -1427,9 +1427,10 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                 return result
             except Exception as e:
                 print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
-        # qwen2.5vl 失败，尝试 opendataloader 备选
+
+        # qwen2.5vl 失败，opendataloader 保底
         if not force_qwen:
-            print(f"[警告] qwen2.5vl 失败，降级到 opendataloader（fast模式）...")
+            print(f"[警告] qwen2.5vl 失败（VRAM未释放或执行失败），降级到 opendataloader fast...")
             detection = {"type": "digital", "lang": lang, "total_pages": total}
             cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
             env = os.environ.copy()
@@ -1443,102 +1444,174 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                     return result
             except Exception as e:
                 print(f"[警告] opendataloader 备选也失败: {e}", file=sys.stderr)
-        else:
+        if force_qwen:
             print(f"[警告] qwen2.5vl 失败（force_qwen=True 禁止降级），返回失败")
         return result
 
-    # 全部是 scanned 页 → 直接用 qwen2.5vl OCR
-    if not digital_pages:
-        print(f"[Step 2/4] 全部 {len(scanned_pages)} 页为扫描页，直接用 qwen2.5vl OCR...")
-        ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
-        if ocr_result.get("success"):
-            result["success"] = True
-            result["mode_used"] = "per-page-scanned-only"
-            result["files_created"] = [ocr_result.get("json_path"), ocr_result.get("md_path")]
-            return result
-        # OCR 失败保底
-        detection = {"type": "scanned", "lang": lang, "total_pages": total}
-        cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-        env = os.environ.copy()
-        env["JAVA_HOME"] = JAVA_HOME
-        env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-            if proc.returncode == 0:
-                result["success"] = True
-                result["mode_used"] = "per-page-ocr-fallback"
-                return result
-        except:
-            pass
+
         return result
 
-    # 混合 PDF（digital + scanned）：所有页都用 qwen2.5vl
-    # 原因：digital 页中也可能包含表格，opendataloader 会丢失表格结构
-    print(f"[Step 2/4] 混合 PDF，所有 {total} 页 → qwen2.5vl（保证表格结构）")
 
-    # 准备临时目录
-    tmp_scanned_dir = os.path.join(output_dir, "_tmp_scanned")
-    os.makedirs(tmp_scanned_dir, exist_ok=True)
+        # 全部是 scanned 页 → 队列等待VRAM后用 qwen2.5vl
+        if not digital_pages:
+            print(f"[Step 2/4] 全部 {len(scanned_pages)} 页为扫描页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
+            _got_vram = False
+            _vm = None
+            try:
+                sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
+                from vram_manager import VMgr
+                _vm = VMgr()
+                import time as _time
+                _waited = 0
+                while _waited < 300:
+                    _status = _vm.status()
+                    _vram_free = _status.get("vram_free_mb", 0)
+                    _state = _status.get("state", "?")
+                    if _vram_free >= 18000:
+                        if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                            _got_vram = True
+                            break
+                    if _waited == 0:
+                        print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
+                    _time.sleep(10)
+                    _waited += 10
+                    if _waited % 30 == 0:
+                        print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
+                if not _got_vram and _waited > 0:
+                    print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
+            except Exception as _e:
+                print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
 
-    digital_result = None
-    ocr_result = None
+            ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
+            if ocr_result.get("success") and ocr_result.get("json_path"):
+                try:
+                    with open(ocr_result["json_path"], encoding="utf-8") as f:
+                        ocr_json = json.load(f)
+                    kids_data = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
+                    final_json = {
+                        "doc_type": "scanned_pdf_qwen",
+                        "source": "qwen2.5vl",
+                        "kids": kids_data,
+                        "total_tables": ocr_json.get("traceability", {}).get("total_tables", 0),
+                        "total_paragraphs": ocr_json.get("traceability", {}).get("total_paragraphs", 0),
+                    }
+                    basename = Path(pdf_path).stem
+                    merged_json_path = Path(output_dir) / f"{basename}.json"
+                    with open(merged_json_path, "w", encoding="utf-8") as f:
+                        json.dump(final_json, f, ensure_ascii=False, indent=2)
+                    md_content = convert_pdf_to_markdown_merged(final_json)
+                    md_path = Path(output_dir) / f"{basename}.md"
+                    with open(md_path, "w", encoding="utf-8") as f:
+                        f.write(md_content)
+                    result["success"] = True
+                    result["mode_used"] = "per-page-scanned-only"
+                    result["files_created"] = [str(merged_json_path), str(md_path)]
+                    print(f"[成功] scanned+qwen2.5vl 完成: {len(kids_data)} kids, {ocr_json.get('traceability',{}).get('total_tables',0)} 表格")
+                    return result
+                except Exception as e:
+                    print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
+            # 失败保底
+            print(f"[警告] qwen2.5vl 失败，降级到 opendataloader...")
+            detection = {"type": "scanned", "lang": lang, "total_pages": total}
+            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
+            env = os.environ.copy()
+            env["JAVA_HOME"] = JAVA_HOME
+            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+                if proc.returncode == 0:
+                    result["success"] = True
+                    result["mode_used"] = "per-page-ocr-fallback"
+                    return result
+            except:
+                pass
+            return result
 
-    # 用 qwen_ocr_pdf 处理全部页面，它自带 VRAM 协调
-    ocr_call_result = qwen_ocr_pdf(
-        pdf_path=pdf_path,
-        output_dir=tmp_scanned_dir,
-        lang=lang,
-        pages_to_skip=[],  # 处理全部页（digital 页也会重新提取以保留表格）
-    )
 
-    # 加载 OCR 结果的 JSON（qwen_ocr_pdf 只返回文件路径）
-    ocr_result = {}
-    if ocr_call_result.get("success") and ocr_call_result.get("json_path"):
+        # 混合 PDF（digital + scanned）：所有页都用 qwen2.5vl，队列等待VRAM
+        print(f"[Step 2/4] 混合 PDF，所有 {total} 页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
+
+        _got_vram = False
+        _vm = None
         try:
-            with open(ocr_call_result["json_path"], encoding="utf-8") as f:
-                ocr_json = json.load(f)
+            sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
+            from vram_manager import VMgr
+            _vm = VMgr()
+            import time as _time
+            _waited = 0
+            while _waited < 300:
+                _status = _vm.status()
+                _vram_free = _status.get("vram_free_mb", 0)
+                _state = _status.get("state", "?")
+                if _vram_free >= 18000:
+                    if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                        _got_vram = True
+                        break
+                if _waited == 0:
+                    print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
+                _time.sleep(10)
+                _waited += 10
+                if _waited % 30 == 0:
+                    print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
+            if not _got_vram and _waited > 0:
+                print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
+        except Exception as _e:
+            print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
+
+        tmp_scanned_dir = os.path.join(output_dir, "_tmp_scanned")
+        os.makedirs(tmp_scanned_dir, exist_ok=True)
+
+        ocr_call_result = qwen_ocr_pdf(
+            pdf_path=pdf_path,
+            output_dir=tmp_scanned_dir,
+            lang=lang,
+            pages_to_skip=[],  # 处理全部页（digital 页也会重新提取以保留表格）
+        )
+
+        ocr_result = {}
+        if ocr_call_result.get("success") and ocr_call_result.get("json_path"):
+            try:
+                with open(ocr_call_result["json_path"], encoding="utf-8") as f:
+                    ocr_json = json.load(f)
                 ocr_result["kids"] = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
                 ocr_result["total_tables"] = ocr_json.get("traceability", {}).get("total_tables", 0)
                 ocr_result["total_paragraphs"] = ocr_json.get("traceability", {}).get("total_paragraphs", 0)
-        except Exception as e:
-            print(f"[警告] 加载 OCR 结果失败: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"[警告] 加载 OCR 结果失败: {e}", file=sys.stderr)
 
-    # Step 4/4: 生成最终输出
-    print(f"[Step 4/4] 生成最终 JSON 和 Markdown...")
+        print(f"[Step 4/4] 生成最终 JSON 和 Markdown...")
 
-    # qwen2.5vl 的结果即为最终结果（无需合并）
-    merged = ocr_result if ocr_result else {"kids": [], "total_tables": 0, "total_paragraphs": 0}
-    merged.setdefault("kids", merged.pop("elements", merged.pop("flat_elements", [])))
+        merged = ocr_result if ocr_result else {"kids": [], "total_tables": 0, "total_paragraphs": 0}
+        merged.setdefault("kids", merged.pop("elements", merged.pop("flat_elements", [])))
 
-    basename = Path(pdf_path).stem
-    merged_json_path = Path(output_dir) / f"{basename}.json"
-    with open(merged_json_path, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
+        basename = Path(pdf_path).stem
+        merged_json_path = Path(output_dir) / f"{basename}.json"
+        with open(merged_json_path, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
 
-    # 生成 Markdown
-    md_content = convert_pdf_to_markdown_merged(merged)
-    md_path = Path(output_dir) / f"{basename}.md"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
+        md_content = convert_pdf_to_markdown_merged(merged)
+        md_path = Path(output_dir) / f"{basename}.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
 
-    # 清理临时目录
-    import shutil
-    shutil.rmtree(tmp_scanned_dir, ignore_errors=True)
+        import shutil
+        shutil.rmtree(tmp_scanned_dir, ignore_errors=True)
 
-    print(f"[成功] 逐页自适应处理完成！")
-    print(f"[INFO] 生成文件:")
-    print(f"  JSON: {merged_json_path}  (内容:{len(merged.get('kids', []))}元素 | 表格:{merged.get('total_tables', 0)} | 段落:{merged.get('total_paragraphs', 0)})")
-    print(f"  MD:   {md_path}")
+        print(f"[成功] 逐页自适应处理完成！")
+        print(f"[INFO] 生成文件:")
+        print(f"  JSON: {merged_json_path}  (内容:{len(merged.get('kids', []))}元素 | 表格:{merged.get('total_tables', 0)} | 段落:{merged.get('total_paragraphs', 0)})")
+        print(f"  MD:   {md_path}")
 
-    result["success"] = True
-    result["files_created"] = [str(merged_json_path), str(md_path)]
-    result["classification"] = {
-        "total": total,
-        "digital": digital_pages,
-        "scanned": scanned_pages,
-        "lang": lang,
-    }
-    return result
+        result["success"] = True
+        result["files_created"] = [str(merged_json_path), str(md_path)]
+        result["classification"] = {
+            "total": total,
+            "digital": digital_pages,
+            "scanned": scanned_pages,
+            "lang": lang,
+        }
+        return result
+
 
 
 def convert_pdf_to_markdown_merged(merged: dict) -> str:
