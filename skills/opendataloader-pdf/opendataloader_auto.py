@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-opendataloader_auto.py — v2.0.0 (2026-04-24)
-表格结构提取：qwen2.5vl OCR + table_data(2D数组) 降级备选opendataloader fast 模式。
+"""opendataloader_auto.py v2.0.0 (2026-04-24)
+表格结构提取: qwen2.5vl OCR + table_data(2D数组), 降级备选opendataloader fast模式。
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
-版本: 1.9.0
+版本: 2.0.0
 日期: 2026-04-24
 
 更新说明：
@@ -170,10 +170,12 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 continue  # 跳过数字页，只 OCR 扫描页
             try:
                 page = doc.get_page(page_idx)
-                pil_img = page.render(scale=72 / 72.0).to_pil()
+                # 用较低分辨率渲染（72→60dpi，quality 75→70），减少VRAM压力
+                pil_img = page.render(scale=60 / 72.0).to_pil()
                 buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=75)
+                pil_img.save(buf, format="JPEG", quality=70)
                 img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                pil_img.close()  # 立即释放PIL图像内存
             except Exception as e:
                 print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
                 continue
