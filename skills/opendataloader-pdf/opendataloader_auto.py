@@ -1330,10 +1330,12 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
     """
     逐页自适应处理 PDF：
     1. 逐页分类（digital / scanned）
-    2. digital 页 → opendataloader Fast 模式（快，无表格结构）
-       但若 force_qwen=True，则 digital 页也用 qwen2.5vl（慢，有表格结构）
-    3. scanned 页 → qwen2.5vl OCR（必有表格结构）
-    4. 合并结果统一输出
+    2. 所有 PDF 类型都使用 qwen2.5vl（保证表格结构）
+       - digital-only: qwen2.5vl 全页 OCR（慢但保表格结构）
+       - scanned-only: qwen2.5vl 全页 OCR（有表格结构）
+       - mixed: qwen2.5vl 全链路（所有页都用，保障表格）
+       - force_qwen=False 时 digital-only 可降级为 opendataloader（快，约2秒）
+    3. 合并结果统一输出
     """
     import io  # 用于扫描页图像渲染
     import base64  # 用于图像base64编码
@@ -1360,57 +1362,55 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
         print("[错误] 无法读取 PDF 页", file=sys.stderr)
         return result
 
-    # 全部是 digital 页
+    # 全部是 digital 页 → qwen2.5vl（保表格结构），opendataloader 作备选
     if not scanned_pages:
-        if force_qwen:
-            # force_qwen=True：digital 页也用 qwen2.5vl（慢但保表格结构）
-            print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，force_qwen=True → 用 qwen2.5vl（保表格结构）...")
-            ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
-            if ocr_result.get("success") and ocr_result.get("json_path"):
-                # qwen_ocr_pdf 输出 elements，需要转换为 kids 结构
-                try:
-                    with open(ocr_result["json_path"], encoding="utf-8") as f:
-                        ocr_json = json.load(f)
-                    kids_data = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
-                    # 写入统一格式（kids 结构）
-                    final_json = {
-                        "doc_type": "digital_pdf_qwen",
-                        "source": "qwen2.5vl",
-                        "kids": kids_data,
-                        "total_tables": ocr_json.get("traceability", {}).get("total_tables", 0),
-                        "total_paragraphs": ocr_json.get("traceability", {}).get("total_paragraphs", 0),
-                    }
-                    basename = Path(pdf_path).stem
-                    merged_json_path = Path(output_dir) / f"{basename}.json"
-                    with open(merged_json_path, "w", encoding="utf-8") as f:
-                        json.dump(final_json, f, ensure_ascii=False, indent=2)
-                    md_content = convert_pdf_to_markdown_merged(final_json)
-                    md_path = Path(output_dir) / f"{basename}.md"
-                    with open(md_path, "w", encoding="utf-8") as f:
-                        f.write(md_content)
-                    result["success"] = True
-                    result["mode_used"] = "per-page-digital-qwen"
-                    result["files_created"] = [str(merged_json_path), str(md_path)]
-                    print(f"[成功] digital+qwen2.5vl 完成: {len(kids_data)} kids")
-                    return result
-                except Exception as e:
-                    print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
-            print(f"[警告] qwen2.5vl 失败，降级到 opendataloader...")
-        # 默认：opendataloader 快速路径（可能有表格结构丢失）
-        print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，直接用 opendataloader 提取...")
-        detection = {"type": "digital", "lang": lang, "total_pages": total}
-        cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-        env = os.environ.copy()
-        env["JAVA_HOME"] = JAVA_HOME
-        env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-            if proc.returncode == 0:
+        print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，用 qwen2.5vl 保表格结构...")
+        ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
+        if ocr_result.get("success") and ocr_result.get("json_path"):
+            try:
+                with open(ocr_result["json_path"], encoding="utf-8") as f:
+                    ocr_json = json.load(f)
+                kids_data = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
+                final_json = {
+                    "doc_type": "digital_pdf_qwen",
+                    "source": "qwen2.5vl",
+                    "kids": kids_data,
+                    "total_tables": ocr_json.get("traceability", {}).get("total_tables", 0),
+                    "total_paragraphs": ocr_json.get("traceability", {}).get("total_paragraphs", 0),
+                }
+                basename = Path(pdf_path).stem
+                merged_json_path = Path(output_dir) / f"{basename}.json"
+                with open(merged_json_path, "w", encoding="utf-8") as f:
+                    json.dump(final_json, f, ensure_ascii=False, indent=2)
+                md_content = convert_pdf_to_markdown_merged(final_json)
+                md_path = Path(output_dir) / f"{basename}.md"
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(md_content)
                 result["success"] = True
-                result["mode_used"] = "per-page-digital-only"
+                result["mode_used"] = "per-page-digital-qwen"
+                result["files_created"] = [str(merged_json_path), str(md_path)]
+                print(f"[成功] digital+qwen2.5vl 完成: {len(kids_data)} kids, {ocr_json.get('traceability',{}).get('total_tables',0)} 表格")
                 return result
-        except Exception as e:
-            print(f"[警告] opendataloader 失败: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
+        # qwen2.5vl 失败，尝试 opendataloader 备选
+        if not force_qwen:
+            print(f"[警告] qwen2.5vl 失败，降级到 opendataloader（fast模式）...")
+            detection = {"type": "digital", "lang": lang, "total_pages": total}
+            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
+            env = os.environ.copy()
+            env["JAVA_HOME"] = JAVA_HOME
+            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+                if proc.returncode == 0:
+                    result["success"] = True
+                    result["mode_used"] = "per-page-digital-only-fallback"
+                    return result
+            except Exception as e:
+                print(f"[警告] opendataloader 备选也失败: {e}", file=sys.stderr)
+        else:
+            print(f"[警告] qwen2.5vl 失败（force_qwen=True 禁止降级），返回失败")
         return result
 
     # 全部是 scanned 页 → 直接用 qwen2.5vl OCR
