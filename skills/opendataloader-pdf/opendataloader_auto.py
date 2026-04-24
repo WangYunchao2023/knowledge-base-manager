@@ -1399,37 +1399,44 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                 with open(digital_json, encoding="utf-8") as f:
                     digital_result = json.load(f)
 
-                # opendataloader --pages 不返回 page_number，逐页比对内容分配页码
+                # opendataloader --pages 不返回 page_number，改为两阶段分配
+                # Stage 1: 文本匹配（对目录页等结构化内容有效）
                 try:
                     from pypdf import PdfReader
                     reader = PdfReader(pdf_path)
-                    # 建立每页文本 → 页码 的映射
                     page_texts = {}
                     for i, page in enumerate(reader.pages):
                         page_num = i + 1
                         if page_num in digital_pages:
                             page_texts[page_num] = (page.extract_text() or "").strip()
 
-                    # 为每个 kid 元素匹配页码
                     digital_kids = digital_result.get("kids", [])
                     for kid in digital_kids:
-                        if kid.get("page_number") is None:
-                            content = kid.get("content", "")[:200]
-                            best_match = None
-                            for pn, ptext in page_texts.items():
-                                if content[:50] in ptext:
-                                    best_match = pn
-                                    break
-                            kid["page_number"] = best_match or digital_pages[0]
+                        if kid.get("page_number") is not None:
+                            continue
+                        content = kid.get("content", "")[:200]
+                        best_match = None
+                        for pn, ptext in page_texts.items():
+                            if content[:50] in ptext:
+                                best_match = pn
+                                break
+                        kid["page_number"] = best_match
+                except Exception:
+                    pass  # 静默失败，用 Stage 2
 
-                    digital_result["kids"] = digital_kids
-                except Exception as e:
-                    # 匹配失败时按顺序分配（保底）
-                    digital_kids = digital_result.get("kids", [])
-                    for i, kid in enumerate(digital_kids):
-                        if kid.get("page_number") is None:
-                            kid["page_number"] = digital_pages[min(i, len(digital_pages)-1)]
-                    digital_result["kids"] = digital_kids
+                # Stage 2: 顺序分配（保证所有元素都有页码）
+                # 按出现顺序均分到各数字页，保留已匹配的页码
+                digital_kids = digital_result.get("kids", [])
+                unassigned = [k for k in digital_kids if k.get("page_number") is None]
+                if unassigned and digital_pages:
+                    # 按页平均分配
+                    per_page = max(1, len(unassigned) // len(digital_pages))
+                    idx = 0
+                    for kid in unassigned:
+                        kid["page_number"] = digital_pages[min(idx // per_page, len(digital_pages) - 1)]
+                        idx += 1
+
+                digital_result["kids"] = digital_kids
 
                 print(f"[      ] opendataloader 提取 {len(digital_result.get('kids', []))} 个元素")
         else:
