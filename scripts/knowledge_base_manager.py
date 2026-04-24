@@ -331,27 +331,91 @@ def scan_for_new_files(scan_dirs, indexed_ids):
 
 # ---- 单文件处理 ----
 
-def compute_content_hash(md_path):
-    """对 .md 文件内容计算 SHA256 哈希（用于内容级去重）"""
-    if not os.path.exists(md_path):
+def compute_page_hash(json_path, page_num):
+    """
+    从 opendataloader 的 JSON（带 PDF 页码）中提取指定页的纯文本段落，
+    按 bounding box 顺序拼接后计算 SHA256。
+    
+    参数:
+        json_path: opendataloader 输出的 .json 文件路径
+        page_num:  PDF 页码（1-based）
+    返回:
+        字符串的 SHA256 哈希值；若页不存在或出错返回 None
+    """
+    if not os.path.exists(json_path):
         return None
-    with open(md_path, "r", encoding="utf-8") as fh:
-        content = fh.read()
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    try:
+        with open(json_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+
+    # 从 kids 中提取该页的所有段落（paragraph type）
+    paragraphs = []
+    def extract_pages(item):
+        if isinstance(item, dict):
+            pn = item.get("page number") or item.get("page")
+            if pn == page_num and item.get("type") == "paragraph":
+                text = item.get("content", "").strip()
+                if text:
+                    paragraphs.append((item.get("bounding box", [0])[0], text))
+            for child in item.get("kids", []):
+                extract_pages(child)
+        elif isinstance(item, list):
+            for sub in item:
+                extract_pages(sub)
+
+    extract_pages(data)
+
+    if not paragraphs:
+        # fallback：尝试直接遍历 kids
+        for item in data.get("kids", []):
+            extract_pages(item)
+
+    if not paragraphs:
+        return None
+
+    # 按 bounding box x 坐标排序（同一页内从左到右）
+    paragraphs.sort(key=lambda x: x[0])
+    combined = "\n".join(t for _, t in paragraphs)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
-def check_duplicate_by_hash(md_path, index_data):
+def compute_content_hash_from_pages(json_path):
     """
-    检查内容是否与已有文档重复。
-    返回 (is_duplicate, existing_doc)  — is_duplicate=True 时 existing_doc 为冲突条目。
+    对 PDF 正文前两页（第1页 + 第2页）分别计算内容哈希。
+    返回 {"page1": hash, "page2": hash}；
+    若某页不存在或无法提取，hash 为 None。
+    用于内容级去重（排版不同/表格提取差异不影响前两页的文本内容）。
     """
-    new_hash = compute_content_hash(md_path)
-    if not new_hash:
-        return False, None
+    p1 = compute_page_hash(json_path, 1)
+    p2 = compute_page_hash(json_path, 2)
+    return {"page1": p1, "page2": p2}
+
+
+def check_duplicate_by_hash(extracted_json, index_data):
+    """
+    基于 PDF 正文第1页 + 第2页的纯文本内容哈希进行去重。
+    两页都与已有文档相同 → 判定为重复。
+    仅第1页相同 → 不视为重复（可能是同一系列文件的封面相同）。
+
+    返回 (is_duplicate, conflicting_doc)
+    """
+    hashes = compute_content_hash_from_pages(extracted_json)
+    if not hashes or (hashes["page1"] is None and hashes["page2"] is None):
+        return False, None  # 无法提取，无从对比，不拦截
+
     for doc in index_data.get("documents", []):
-        stored_hash = doc.get("content_hash")
-        if stored_hash and stored_hash == new_hash:
-            return True, doc
+        stored = doc.get("content_hash", {})
+        if not stored or not isinstance(stored, dict):
+            continue
+
+        p1_match = hashes["page1"] and stored.get("page1") == hashes["page1"]
+        p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
+
+        if p1_match and p2_match:
+            return True, doc  # 两页均相同，判定为重复
+
     return False, None
 
 
@@ -395,16 +459,16 @@ def process_new_file(f, index_data):
         else:
             log(f"  → 提取失败: {result}", "⚠️")
     
-    # 2.5 内容哈希去重检查（基于 .md 纯文本内容）
-    if os.path.exists(extracted_md):
-        is_dup, dup_doc = check_duplicate_by_hash(extracted_md, index_data)
+    # 2.5 内容哈希去重检查（基于 PDF 正文第1+2页纯文本）
+    if os.path.exists(extracted_json):
+        is_dup, dup_doc = check_duplicate_by_hash(extracted_json, index_data)
         if is_dup:
             log(f"  ⚠️  内容与已有文档重复，已跳过入库", "🔄")
             print(f"  重复文档: {dup_doc['title']}（{dup_doc.get('issue_date', '无日期')}）")
             return None  # 跳过入库
     
     # 3. 构建索引条目（路径为相对路径）
-    content_hash = compute_content_hash(extracted_md) if os.path.exists(extracted_md) else None
+    content_hash = compute_content_hash_from_pages(extracted_json) if os.path.exists(extracted_json) else None
     index_entry = {
         "id": meta['id'],
         "title": meta['title'],
