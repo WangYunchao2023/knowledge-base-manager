@@ -107,11 +107,11 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
-               lang: str = "zh,en",
-               pages_to_skip: list = None) -> dict:
+                lang: str = "zh,en",
+                pages_to_skip: list = None) -> dict:
     """
     使用本地 qwen2.5vl 对扫描 PDF 进行 OCR
-    自动协调 VRAM：OCR 前让出显存，OCR 后恢复 LLM
+    逐页处理，每页独立获取VRAM → OCR → 立即释放VRAM
 
     pages_to_skip: 数字页列表（只跳过，不 OCR），节省时间
     """
@@ -119,27 +119,19 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
     import base64
     import io
 
-    _vram_acquired = False
     _vm = None
     _result = {"success": False}
 
-    # ---- VRAM 协调（放在最外层 try/finally 确保恢复）----
+    # ---- VRAM 初始化（获取调度器引用，暂不占用）----
     try:
-        try:
-            sys.path.insert(0, "/home/wangyc/.openclaw/scripts")
-            from vram_manager import VMgr
-            _vm = VMgr()
-            if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
-                _vram_acquired = True
-                print(f"[INFO] VRAM 已腾出，qwen2.5vl 可用", file=sys.stderr)
-            else:
-                print(f"[警告] VRAM 协调失败，继续尝试 OCR...", file=sys.stderr)
-        except Exception as e:
-            print(f"[警告] VRAM 协调异常: {e}，继续 OCR...", file=sys.stderr)
+        sys.path.insert(0, "/home/wangyc/.openclaw/scripts")
+        from vram_manager import VMgr
+        _vm = VMgr()
+    except Exception as e:
+        print(f"[警告] VRAM 调度器初始化失败: {e}，将直接执行 OCR...", file=sys.stderr)
 
-        # ---- 正式 OCR 处理 ----
-        print(f"[INFO] 使用 qwen2.5vl 进行扫描 PDF OCR...")
-
+    # ---- 正式 OCR 处理（外层 try 确保 VRAM 始终被恢复）----
+    try:
         try:
             import pypdfium2 as pdfium
         except ImportError:
@@ -149,7 +141,7 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
         try:
             doc = pdfium.PdfDocument(pdf_path)
             total_pages = len(doc)
-            print(f"[INFO] PDF 共 {total_pages} 页，开始逐页 OCR...")
+            print(f"[INFO] PDF 共 {total_pages} 页，开始逐页 OCR（每页独立VRAM）...")
         except Exception as e:
             print(f"[错误] 无法读取 PDF: {e}", file=sys.stderr)
             return _result
@@ -168,6 +160,17 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
             page_num = page_idx + 1
             if page_num in skip_set:
                 continue  # 跳过数字页，只 OCR 扫描页
+
+            # === VRAM 每页获取（渲染前让出，给ComfyUI机会）===
+            _page_vram_acquired = False
+            if _vm is not None:
+                try:
+                    if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                        _page_vram_acquired = True
+                        print(f"[INFO] VRAM 已腾出（第{page_num}页），qwen2.5vl 可用")
+                except Exception as _e:
+                    print(f"[警告] VRAM 获取异常: {_e}，继续尝试...", file=sys.stderr)
+
             try:
                 page = doc.get_page(page_idx)
                 pil_img = page.render(scale=72 / 72.0).to_pil()
@@ -175,8 +178,13 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 pil_img.save(buf, format="JPEG", quality=75)
                 img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 pil_img.close()  # 立即释放PIL图像内存
-            except Exception as e:
-                print(f"[警告] 第 {page_num} 页渲染失败: {e}", file=sys.stderr)
+            except Exception as _e:
+                print(f"[警告] 第 {page_num} 页渲染失败: {_e}", file=sys.stderr)
+                if _page_vram_acquired and _vm is not None:
+                    try:
+                        _vm.release_and_restore()
+                    except Exception:
+                        pass
                 continue
 
             # 调用 Ollama（重试3次）
@@ -185,7 +193,8 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 try:
                     payload = {
                         "model": QWEN_MODEL,
-                        "messages": [{"role": "user", "content": QWEN_OCR_PROMPT, "images": [img_b64]}],
+                        "messages": [{"role": "user", "content": QWEN_OCR_PROMPT.format(
+                            prompt_img=img_b64, lang=lang)}],
                         "stream": False,
                         "options": {"temperature": 0.01}
                     }
@@ -197,14 +206,21 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     )
                     with urllib.request.urlopen(req, timeout=180) as resp:
                         result_data = json.loads(resp.read())
-                        content = result_data.get("message", {}).get("content", "").strip()
+                        content = result_data.get("message", {}).get("content", "")
                         break
-                except Exception as e:
+                except Exception as _e:
                     if attempt < 2:
-                        import time
-                        time.sleep(2)
+                        import time as _time
+                        _time.sleep(2)
                     else:
-                        print(f"[警告] 第 {page_num} 页 OCR 失败: {e}", file=sys.stderr)
+                        print(f"[警告] 第 {page_num} 页 OCR 失败: {_e}", file=sys.stderr)
+
+            # === VRAM 每页立即释放（趁qwen2.5vl还在显存中）===
+            if _page_vram_acquired and _vm is not None:
+                try:
+                    _vm.release_and_restore()
+                except Exception as _e:
+                    print(f"[警告] VRAM 恢复异常(页{page_num}): {_e}", file=sys.stderr)
 
             if not content:
                 continue
@@ -212,8 +228,8 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
             # 解析 JSON
             try:
                 if content.startswith('```'):
-                    lines = content.split('\n')
-                    content = '\n'.join(lines[1:] if lines[0].startswith('```') else lines)
+                    _lines_split = content.split('\n')
+                    content = '\n'.join(_lines_split[1:] if _lines_split[0].startswith('```') else _lines_split)
                     if content.endswith('```'):
                         content = content[:-3].strip()
                 start, end = content.find('{'), content.rfind('}') + 1
@@ -241,12 +257,10 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     total_tables += 1
                     elem = {"type": "table", "content": bcontent,
                         "page_number": page_num, "table_index": total_tables}
-                    # 提取 table_data（2D 数组，qwen2.5vl 输出）
                     table_data = block.get("table_data")
                     if table_data and isinstance(table_data, list):
                         elem["table_data"] = table_data
                     else:
-                        # fallback：从 content 解析 Markdown 表格
                         elem["table_data"] = _parse_markdown_table(bcontent)
                     all_elements.append(elem)
 
@@ -281,15 +295,15 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
         _result = {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
 
     finally:
-        # VRAM 恢复（无论成功还是失败都要恢复）
-        if _vram_acquired and _vm is not None:
+        # VRAM 最终恢复（清理残余状态）
+        if _vm is not None:
             try:
                 _vm.release_and_restore()
-                print(f"[INFO] VRAM 已恢复", file=sys.stderr)
-            except Exception as e:
-                print(f"[警告] VRAM 恢复异常: {e}", file=sys.stderr)
+            except Exception:
+                pass
 
     return _result
+
 
 def convert_word_to_pdf(docx_path: str, output_dir: str = "/tmp") -> str:
     """
