@@ -42,7 +42,11 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
 def check_qwen_available() -> bool:
-    """检查本地 qwen2.5vl 是否可用"""
+    """检查本地 qwen2.5vl 是否可用（默认关闭，防止 OOM）"""
+    # qwen2.5vl OCR 内存消耗大，容易 OOM 导致进程被 kill。
+    # 默认返回 False，优先使用 EasyOCR。如需启用 qwen，设置环境变量 ENABLE_QWEN=1。
+    if os.environ.get("ENABLE_QWEN", "0") != "1":
+        return False
     import urllib.request
     try:
         req = urllib.request.Request(
@@ -53,7 +57,7 @@ def check_qwen_available() -> bool:
             data = json.loads(resp.read())
             models = [m["name"] for m in data.get("models", [])]
             if any("qwen" in m.lower() and "vl" in m.lower() for m in models):
-                print(f"[INFO] 检测到 qwen2.5vl: {[m for m in models if 'qwen' in m.lower()]}")
+                print(f"[INFO] qwen2.5vl 已启用（ENABLE_QWEN=1）", file=sys.stderr)
                 return True
     except Exception:
         pass
@@ -919,9 +923,44 @@ def extract_word_to_json(docx_path: str) -> dict:
             })
             table_index += 1
 
+    # 统一 kids 结构（与 PDF JSON 格式一致，供 compute_page_hash 兼容使用）
+    kids = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = para.style.name if para.style else ""
+        heading_level = None
+        if style_name.startswith("Heading") or (para.style and "Heading" in para.style.name):
+            for c in style_name:
+                if c.isdigit():
+                    heading_level = int(c)
+                    break
+            if heading_level is None:
+                heading_level = 1
+        kids.append({
+            "type": "paragraph",
+            "page number": 1,
+            "content": text,
+            "heading_level": heading_level,
+            "bounding box": [0, 0, 0, 0],
+        })
+    for table in doc.tables:
+        rows_data = [[cell.text.strip() for cell in row.cells] for row in table.rows if row.cells]
+        if rows_data:
+            kids.append({
+                "type": "table",
+                "page number": 1,
+                "content": "\n".join([" | ".join(row) for row in rows_data]),
+                "table_data": rows_data,
+                "bounding box": [0, 0, 0, 0],
+            })
+
     return {
         "doc_type": "word",
         "original_word": docx_path,
+        "number of pages": 1,
+        "kids": kids,
         "traceability": {
             "total_elements": len(elements),
             "total_paragraphs": paragraph_index,
@@ -1032,25 +1071,36 @@ def detect_pdf_type(pdf_path: str) -> dict:
         result["total_pages"] = len(reader.pages)
 
         # 检查前5页（统计有文字的页数）
-        sample_pages = min(5, len(reader.pages))
-        text_count = 0
+        # 采样策略：取文档前中后三个区段，避免封面/目录页干扰
+        total_pages = len(reader.pages)
+        sample_indices = (
+            list(range(0, min(3, total_pages))) +       # 前段：第1-3页
+            list(range(total_pages // 2 - 1, total_pages // 2 + 1)) +  # 中段
+            list(range(max(0, total_pages - 3), total_pages))          # 后段：最后3页
+        )
+        sample_indices = sorted(set(i for i in sample_indices if i < total_pages))
 
-        for i in range(sample_pages):
+        text_count = 0
+        scanned_count = 0
+
+        for i in sample_indices:
             page = reader.pages[i]
             text = page.extract_text() or ""
-            # 去除空白后字数
             chars = len(text.strip())
             if chars > 50:
                 text_count += 1
+            else:
+                scanned_count += 1
 
-        scanned_pages = sample_pages - text_count
+        sample_size = len(sample_indices)
+        scanned_pages = scanned_count
         result["scanned_pages"] = scanned_pages
         result["text_pages"] = text_count
 
-        # 判断类型
+        # 判断类型（任一采样页为扫描版即触发 OCR）
         if scanned_pages == 0:
             result["type"] = "digital"
-        elif scanned_pages == sample_pages:
+        elif text_count == 0:
             result["type"] = "scanned"
         else:
             result["type"] = "mixed"  # 混合：部分扫描+部分文字
@@ -1472,6 +1522,13 @@ def run_convert(pdf_path: str, output_dir: str,
             print(f"[      ] 智能合并：docx内容 + PDF位置 → 统一结构")
             merged = merge_docx_and_pdf(docx_data, pdf_flat)
 
+            # Fallback：合并失败（0元素）时，直接使用 docx 原始内容
+            if not merged.get("elements") and not merged.get("kids"):
+                print(f"[警告] PDF位置匹配失败（0元素），Fallback：直接使用 docx 内容", file=sys.stderr)
+                merged = docx_data  # 直接用 extract_word_to_json 的完整输出
+                merged["kids"] = merged.pop("elements", merged.get("kids", []))
+                merged["original_word"] = os.path.abspath(pdf_path)
+
             # 附加元数据
             merged["source"] = "word-to-pdf-merged"
             merged["original_word"] = os.path.abspath(pdf_path)
@@ -1492,7 +1549,7 @@ def run_convert(pdf_path: str, output_dir: str,
             match_stats = merged.get("_pdf_position_hints", {})
             print(f"[成功] 合并完成！")
             print(f"[INFO] 生成文件:")
-            print(f"  JSON: {merged_json_path}  (内容:{len(merged['elements'])}元素 | 表格:{merged['total_tables']} | 段落:{merged['total_paragraphs']})")
+            print(f"  JSON: {merged_json_path}  (内容:{len(merged.get('kids', []) or merged.get('elements', []))}元素 | 表格:{merged.get('total_tables', 0)} | 段落:{merged.get('total_paragraphs', 0)})")
             print(f"  PDF位置匹配: 表格匹配{match_stats.get('tables_matched','?')}个, 段落匹配{match_stats.get('paras_matched','?')}个")
             print(f"  MD:   {md_path}")
             print(f"[INFO] 临时PDF已清理（{pdf_converted}）")

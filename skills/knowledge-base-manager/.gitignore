@@ -1,0 +1,28 @@
+# Large files and outputs
+graphify-out/
+jobs/
+*.log
+*.pid
+*.lock
+
+# Memory
+memory/
+../memory/
+../../memory/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Git
+.git/
+.git.workspace/
+
+# Runtime state (should not be committed)
+jobs/pending_job.json
+jobs/graphify.lock

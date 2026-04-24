@@ -31,7 +31,7 @@ from pathlib import Path
 # ============ 配置区 ============
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
 INDEX_FILE = os.path.join(KB_ROOT, "guidance_index.json")
-OPENDATALOADER_SCRIPT = "/home/wangyc/.openclaw/workspace/skills/opendataloader-pdf/scripts/opendataloader_auto.py"
+OPENDATALOADER_SCRIPT = "/home/wangyc/.openclaw/workspace/skills/opendataloader-pdf/opendataloader_auto.py"
 
 # 目录规范
 DIR_RAW = "原始文件"
@@ -39,11 +39,11 @@ DIR_EXTRACTED = "供AI用信息"
 
 # 默认扫描源（稳定指导原则的原始文件放入目录）
 SRC_SCAN_DIRS = [
-    "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性指导原则",
+    "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性",
 ]
 
 # Graphify 配置
-GRAPHIFY_TARGET = os.path.join(KB_ROOT, "稳定性指导原则", DIR_EXTRACTED)
+GRAPHIFY_TARGET = os.path.join(KB_ROOT, "稳定性", DIR_EXTRACTED)
 GRAPHIFY_OUTPUT = os.path.join(KB_ROOT, "graphify-out")
 
 # Dify 配置
@@ -69,15 +69,40 @@ CATEGORY_SUBDIRS = {
 }
 
 # 二级分类子目录（在每个一级分类下创建）
+# 顺序：按匹配优先级排列（先匹配的先生效）
 GUIDANCE_SUBDIRS = [
-    "稳定性指导原则",
-    "质量标准",
+    "稳定性",
+    "临床研究",
     "药理学",
     "毒理学",
-    "临床研究",
+    "质量标准",
     "申报注册",
     "其他",
 ]
+
+# 关键词 → 二级子目录 映射（按优先级）
+SUBDIR_KEYWORDS = [
+    ("稳定性", "稳定性"),
+    ("临床研发", "临床研究"),
+    ("临床试验", "临床研究"),
+    ("以患者为中心", "临床研究"),
+    ("药理学", "药理学"),
+    ("毒理学", "毒理学"),
+    ("质量标准", "质量标准"),
+    ("申报", "申报注册"),
+    ("注册", "申报注册"),
+    ("注射剂", "稳定性"),  # 注射剂常涉及配伍稳定性
+    ("配伍", "稳定性"),
+    ("原料药", "稳定性"),
+    ("制剂", "稳定性"),
+]
+
+def _match_subdir(title):
+    """根据文件名关键词匹配二级子目录（返回第一个匹配的）"""
+    for kw, subdir in SUBDIR_KEYWORDS:
+        if kw in title:
+            return subdir
+    return None  # 不匹配任何已知关键词
 # ==============================
 
 def log(msg, emoji="📋"):
@@ -93,10 +118,21 @@ def get_category_dir(category):
 def get_guidance_subdir(title, category):
     """
     根据文档标题自动判断二级子目录。
-    目前默认放「稳定性指导原则」，后续可扩展按文件名关键词分流。
+    1. 先用关键词匹配（SUBDIR_KEYWORDS）
+    2. 若匹配到的子目录不在当前 GUIDANCE_SUBDIRS 中，动态追加
+    3. 若无匹配，返回「其他」
     """
-    # 目前默认都放稳定性指导原则
-    return "稳定性指导原则"
+    # 关键词匹配
+    matched = _match_subdir(title)
+    if matched is None:
+        matched = "其他"
+    
+    # 动态追加：如果匹配到的子目录不在已知列表中，自动追加
+    if matched not in GUIDANCE_SUBDIRS:
+        GUIDANCE_SUBDIRS.append(matched)
+        log(f"🆕 发现新二级目录类型「{matched}」，已自动追加到配置", "📁")
+    
+    return matched
 
 
 def resolve_destination_dir(meta):
@@ -104,18 +140,52 @@ def resolve_destination_dir(meta):
     根据文档 metadata 决定目标目录结构。
     返回 (一级目录, 二级目录, 相对路径前缀)
     
-    例如化学药 + 稳定性指导原则:
+    例如化学药 + 稳定性:
       一级: 化学药
-      二级: 稳定性指导原则
-      相对路径前缀: 化学药/稳定性指导原则/
+      二级: 稳定性
+      相对路径前缀: 化学药/稳定性/
+    
+    注意：动态创建的二级子目录（如「临床研究」）
+    会在首次发现时自动在所有一级分类下创建对应目录。
     """
     cat_dir = get_category_dir(meta["category"])
     guidance_dir = get_guidance_subdir(meta["title"], meta["category"])
+    
+    # 若发现新二级子目录，立即在所有分类下创建其目录结构
+    _ensure_new_subdir_all_categories(KB_ROOT, guidance_dir)
     
     # 相对 KB_ROOT 的路径前缀
     rel_prefix = os.path.join(cat_dir, guidance_dir)
     
     return cat_dir, guidance_dir, rel_prefix
+
+
+def _ensure_new_subdir_all_categories(kb_root, new_subdir):
+    """
+    在所有一级分类目录下创建新二级子目录的完整结构（原始文件/ + 供AI用信息/）。
+    仅在新二级子目录首次出现时调用。
+    """
+    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jobs", "subdirs.json")
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    
+    known = {}
+    if os.path.exists(state_file):
+        try:
+            known = json.load(open(state_file))
+        except:
+            known = {}
+    
+    if new_subdir in known:
+        return  # 已处理过
+    
+    known[new_subdir] = True
+    json.dump(known, open(state_file, "w"), ensure_ascii=False)
+    
+    for cat in CATEGORY_SUBDIRS.values():
+        for sub in [DIR_RAW, DIR_EXTRACTED]:
+            path = os.path.join(kb_root, cat, new_subdir, sub)
+            os.makedirs(path, exist_ok=True)
+    log(f"🆕 自动创建新二级目录「{new_subdir}」（原始文件/ + 供AI用信息/）", "📁")
 
 
 def ensure_category_dirs(kb_root, category):
@@ -129,19 +199,66 @@ def ensure_category_dirs(kb_root, category):
 
 # ---- opendataloader ----
 
-def run_opendataloader(input_file, output_dir):
-    """调用 opendataloader 提取内容"""
-    cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
+def run_opendataloader(input_file, output_dir, force_mode=None):
+    """
+    调用 opendataloader 提取内容。
+    若提取内容为空，自动升级模式重试：
+      digital → hybrid（扫描 PDF 误判）
+      fast    → hybrid（复杂文档）
+    """
+    for attempt in range(2):
+        cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
+        if force_mode:
+            cmd.extend(["--force-mode", force_mode])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                return False, result.stderr
+
+            # 验证提取结果是否有效
+            extracted_base = os.path.splitext(os.path.basename(input_file))[0]
+            json_path = os.path.join(output_dir, extracted_base + ".json")
+            md_path = os.path.join(output_dir, extracted_base + ".md")
+
+            if not os.path.exists(json_path):
+                return False, f"JSON 文件未生成: {json_path}"
+
+            # 内容有效性检查
+            with open(json_path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read(500)
+            if not raw.strip() or raw == "{\n}":
+                raise ValueError("JSON 内容为空")
+
+            try:
+                data = json.loads(raw if len(raw) > 50 else open(json_path).read())
+            except json.JSONDecodeError:
+                raise ValueError("JSON 解析失败")
+
+            # 检查 kids 是否为空（PDF）或 elements 是否为空（DOCX）
+            kids = data.get("kids", data.get("flat_elements", []))
+            if isinstance(kids, list) and len(kids) == 0:
+                raise ValueError("JSON 无段落内容（kids/elements 均为空）")
+
+            # 检查 .md 是否为空
+            if os.path.exists(md_path):
+                md_size = os.path.getsize(md_path)
+                if md_size < 100:
+                    raise ValueError(f".md 内容过少（{md_size} bytes）")
+
             return True, result.stdout
+
+        except subprocess.TimeoutExpired:
+            return False, "超时"
+        except Exception as e:
+            last_err = str(e)
+
+        # 重试逻辑：digital → hybrid
+        if force_mode is None:
+            force_mode = "hybrid"
         else:
-            return False, result.stderr
-    except subprocess.TimeoutExpired:
-        return False, "超时"
-    except Exception as e:
-        return False, str(e)
+            break  # 第二次仍然失败，放弃
+
+    return False, f"提取失败（已重试）: {last_err}"
 
 # ---- 索引读写 ----
 
@@ -261,6 +378,142 @@ def scan_for_new_files(scan_dirs, indexed_ids):
 
 # ---- 单文件处理 ----
 
+def compute_page_hash(json_path, page_num):
+    """
+    从 opendataloader 的 JSON（带 PDF 页码）中提取指定页的纯文本段落，
+    按 bounding box 顺序拼接后计算 SHA256。
+    
+    参数:
+        json_path: opendataloader 输出的 .json 文件路径
+        page_num:  PDF 页码（1-based）
+    返回:
+        字符串的 SHA256 哈希值；若页不存在或出错返回 None
+    """
+    if not os.path.exists(json_path):
+        return None
+    try:
+        with open(json_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+
+    # 从 kids 中提取该页的所有段落（paragraph type）
+    paragraphs = []
+    def extract_pages(item):
+        if isinstance(item, dict):
+            pn = item.get("page number") or item.get("page")
+            if pn == page_num and item.get("type") == "paragraph":
+                text = item.get("content", "").strip()
+                if text:
+                    paragraphs.append((item.get("bounding box", [0])[0], text))
+            for child in item.get("kids", []):
+                extract_pages(child)
+        elif isinstance(item, list):
+            for sub in item:
+                extract_pages(sub)
+
+    extract_pages(data)
+
+    if not paragraphs:
+        # fallback：尝试直接遍历 kids
+        for item in data.get("kids", []):
+            extract_pages(item)
+
+    if not paragraphs:
+        return None
+
+    # 按 bounding box x 坐标排序（同一页内从左到右）
+    paragraphs.sort(key=lambda x: x[0])
+    combined = "\n".join(t for _, t in paragraphs)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
+def compute_pdf_byte_hash(json_path):
+    """
+    当 PDF 正文前两页均为图片/扫描页（无可提取文本）时，
+    用 PDF 原始文件的 SHA256 作为保底哈希。
+    精确度不如文本哈希，但能检测字节级相同的文件。
+    """
+    # 从 JSON 中找到对应的原始 PDF 路径
+    try:
+        data = json.load(open(json_path, encoding="utf-8", errors="replace"))
+        fname = data.get("file name", "") or data.get("original_pdf", "")
+        if not fname or not os.path.exists(fname):
+            # 尝试从 json_path 反推原始 PDF
+            md_basename = os.path.basename(json_path).replace(".json", ".pdf")
+            candidates = [
+                md_basename,
+                md_basename.replace(" _images", ""),
+            ]
+            for c in candidates:
+                # 在 KB_ROOT 下搜索
+                import glob
+                found = glob.glob(os.path.join(KB_ROOT, "**", c), recursive=True)
+                if found:
+                    fname = found[0]
+                    break
+        if fname and os.path.exists(fname):
+            with open(fname, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+    except Exception:
+        pass
+    return None
+
+
+def compute_content_hash_from_pages(json_path):
+    """
+    对 PDF 正文前两页（第1页 + 第2页）分别计算内容哈希。
+    返回 {"page1": hash, "page2": hash}；
+    若某页不存在或无法提取，hash 为 None。
+    若前两页均无可提取文本，自动补充 PDF 字节哈希作为保底。
+    用于内容级去重（排版不同/表格提取差异不影响前两页的文本内容）。
+    """
+    p1 = compute_page_hash(json_path, 1)
+    p2 = compute_page_hash(json_path, 2)
+    result = {"page1": p1, "page2": p2}
+    # 前两页均无文本 → 补充 PDF 字节哈希保底
+    if p1 is None and p2 is None:
+        pdf_hash = compute_pdf_byte_hash(json_path)
+        if pdf_hash:
+            result["pdf_byte"] = pdf_hash
+    return result
+
+
+def check_duplicate_by_hash(extracted_json, index_data):
+    """
+    基于 PDF 正文第1页 + 第2页的纯文本内容哈希进行去重。
+    两页都与已有文档相同 → 判定为重复。
+    仅第1页相同 → 不视为重复（可能是同一系列文件的封面相同）。
+
+    返回 (is_duplicate, conflicting_doc)
+    """
+    hashes = compute_content_hash_from_pages(extracted_json)
+    if not hashes:
+        return False, None  # 无法提取，无从对比，不拦截
+
+    # 优先用文本哈希比对（前两页内容哈希）
+    for doc in index_data.get("documents", []):
+        stored = doc.get("content_hash", {})
+        if not stored or not isinstance(stored, dict):
+            continue
+
+        p1_match = hashes["page1"] and stored.get("page1") == hashes["page1"]
+        p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
+
+        if p1_match and p2_match:
+            return True, doc  # 两页文本均相同，判定为重复
+    
+    # 保底：PDF 字节哈希比对（全扫描文档，无可提取文本时）
+    pdf_byte = hashes.get("pdf_byte")
+    if pdf_byte:
+        for doc in index_data.get("documents", []):
+            stored = doc.get("content_hash", {})
+            if stored.get("pdf_byte") == pdf_byte:
+                return True, doc  # PDF 字节完全相同，判定为重复
+
+    return False, None
+
+
 def process_new_file(f, index_data):
     log(f"处理文件: {f['name']}", "📄")
     meta = parse_filename_for_meta(f['name'])
@@ -301,7 +554,16 @@ def process_new_file(f, index_data):
         else:
             log(f"  → 提取失败: {result}", "⚠️")
     
+    # 2.5 内容哈希去重检查（基于 PDF 正文第1+2页纯文本）
+    if os.path.exists(extracted_json):
+        is_dup, dup_doc = check_duplicate_by_hash(extracted_json, index_data)
+        if is_dup:
+            log(f"  ⚠️  内容与已有文档重复，已跳过入库", "🔄")
+            print(f"  重复文档: {dup_doc['title']}（{dup_doc.get('issue_date', '无日期')}）")
+            return None  # 跳过入库
+    
     # 3. 构建索引条目（路径为相对路径）
+    content_hash = compute_content_hash_from_pages(extracted_json) if os.path.exists(extracted_json) else None
     index_entry = {
         "id": meta['id'],
         "title": meta['title'],
@@ -313,6 +575,7 @@ def process_new_file(f, index_data):
             "type": meta['drug_types']
         },
         "tags": meta['tags'],
+        "content_hash": content_hash,
         "paths": {
             "raw": os.path.join(rel_prefix, DIR_RAW, f['name']),
             "markdown": os.path.join(rel_prefix, DIR_EXTRACTED, extracted_base + ".md"),
@@ -506,6 +769,7 @@ def main():
             fname = os.path.basename(input_path)
             new_files = [{"path": input_path, "name": fname, "ext": os.path.splitext(fname)[1].lower()}]
             log(f"添加指定文件: {input_path}", "📂")
+            index_data = load_index()  # 加载索引（单文件模式也需要）
         elif os.path.isdir(input_path):
             new_files = scan_for_new_files([input_path], set())
             log(f"扫描目录: {input_path}", "📂")

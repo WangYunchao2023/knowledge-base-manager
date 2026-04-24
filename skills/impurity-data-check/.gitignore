@@ -19,3 +19,4 @@ build/
 
 # Backup
 *.bak_*
+impurity-checker.yaml

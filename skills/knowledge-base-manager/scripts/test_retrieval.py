@@ -158,8 +158,7 @@ def simulate_ai_task(query):
     relative_path = top_doc["paths"].get("markdown", "")
     
     # 转换相对路径为绝对路径
-    # guidance_index.json 中的路径是相对于 "供AI用信息" 目录的
-    md_path = os.path.join(KB_ROOT, "稳定性指导原则", "供AI用信息", os.path.basename(relative_path))
+    md_path = os.path.join(KB_ROOT, relative_path)
     
     print("-" * 70)
     print(f"📖 阅读文档: {top_doc['title']}")

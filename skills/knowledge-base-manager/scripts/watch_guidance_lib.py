@@ -10,7 +10,7 @@
   python watch_guidance_lib.py --stop      # 停止守护进程
 
 监控目录:
-  /home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性指导原则/
+  /home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性/
   （只监控此目录下的新 PDF/DOCX 文件）
 
 触发流程:
@@ -27,7 +27,7 @@ import atexit
 from pathlib import Path
 
 # ============ 配置区 ============
-WATCH_DIR = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性指导原则"
+WATCH_DIR = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性"
 KB_MANAGER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_base_manager.py")
 PID_FILE = "/tmp/watch_guidance_lib.pid"
 LOG_FILE = "/tmp/watch_guidance_lib.log"
