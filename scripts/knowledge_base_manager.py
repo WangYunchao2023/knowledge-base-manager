@@ -199,19 +199,66 @@ def ensure_category_dirs(kb_root, category):
 
 # ---- opendataloader ----
 
-def run_opendataloader(input_file, output_dir):
-    """调用 opendataloader 提取内容"""
-    cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
+def run_opendataloader(input_file, output_dir, force_mode=None):
+    """
+    调用 opendataloader 提取内容。
+    若提取内容为空，自动升级模式重试：
+      digital → hybrid（扫描 PDF 误判）
+      fast    → hybrid（复杂文档）
+    """
+    for attempt in range(2):
+        cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
+        if force_mode:
+            cmd.extend(["--force-mode", force_mode])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                return False, result.stderr
+
+            # 验证提取结果是否有效
+            extracted_base = os.path.splitext(os.path.basename(input_file))[0]
+            json_path = os.path.join(output_dir, extracted_base + ".json")
+            md_path = os.path.join(output_dir, extracted_base + ".md")
+
+            if not os.path.exists(json_path):
+                return False, f"JSON 文件未生成: {json_path}"
+
+            # 内容有效性检查
+            with open(json_path, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read(500)
+            if not raw.strip() or raw == "{\n}":
+                raise ValueError("JSON 内容为空")
+
+            try:
+                data = json.loads(raw if len(raw) > 50 else open(json_path).read())
+            except json.JSONDecodeError:
+                raise ValueError("JSON 解析失败")
+
+            # 检查 kids 是否为空（PDF）或 elements 是否为空（DOCX）
+            kids = data.get("kids", data.get("flat_elements", []))
+            if isinstance(kids, list) and len(kids) == 0:
+                raise ValueError("JSON 无段落内容（kids/elements 均为空）")
+
+            # 检查 .md 是否为空
+            if os.path.exists(md_path):
+                md_size = os.path.getsize(md_path)
+                if md_size < 100:
+                    raise ValueError(f".md 内容过少（{md_size} bytes）")
+
             return True, result.stdout
+
+        except subprocess.TimeoutExpired:
+            return False, "超时"
+        except Exception as e:
+            last_err = str(e)
+
+        # 重试逻辑：digital → hybrid
+        if force_mode is None:
+            force_mode = "hybrid"
         else:
-            return False, result.stderr
-    except subprocess.TimeoutExpired:
-        return False, "超时"
-    except Exception as e:
-        return False, str(e)
+            break  # 第二次仍然失败，放弃
+
+    return False, f"提取失败（已重试）: {last_err}"
 
 # ---- 索引读写 ----
 
@@ -381,16 +428,55 @@ def compute_page_hash(json_path, page_num):
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
+def compute_pdf_byte_hash(json_path):
+    """
+    当 PDF 正文前两页均为图片/扫描页（无可提取文本）时，
+    用 PDF 原始文件的 SHA256 作为保底哈希。
+    精确度不如文本哈希，但能检测字节级相同的文件。
+    """
+    # 从 JSON 中找到对应的原始 PDF 路径
+    try:
+        data = json.load(open(json_path, encoding="utf-8", errors="replace"))
+        fname = data.get("file name", "") or data.get("original_pdf", "")
+        if not fname or not os.path.exists(fname):
+            # 尝试从 json_path 反推原始 PDF
+            md_basename = os.path.basename(json_path).replace(".json", ".pdf")
+            candidates = [
+                md_basename,
+                md_basename.replace(" _images", ""),
+            ]
+            for c in candidates:
+                # 在 KB_ROOT 下搜索
+                import glob
+                found = glob.glob(os.path.join(KB_ROOT, "**", c), recursive=True)
+                if found:
+                    fname = found[0]
+                    break
+        if fname and os.path.exists(fname):
+            with open(fname, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()
+    except Exception:
+        pass
+    return None
+
+
 def compute_content_hash_from_pages(json_path):
     """
     对 PDF 正文前两页（第1页 + 第2页）分别计算内容哈希。
     返回 {"page1": hash, "page2": hash}；
     若某页不存在或无法提取，hash 为 None。
+    若前两页均无可提取文本，自动补充 PDF 字节哈希作为保底。
     用于内容级去重（排版不同/表格提取差异不影响前两页的文本内容）。
     """
     p1 = compute_page_hash(json_path, 1)
     p2 = compute_page_hash(json_path, 2)
-    return {"page1": p1, "page2": p2}
+    result = {"page1": p1, "page2": p2}
+    # 前两页均无文本 → 补充 PDF 字节哈希保底
+    if p1 is None and p2 is None:
+        pdf_hash = compute_pdf_byte_hash(json_path)
+        if pdf_hash:
+            result["pdf_byte"] = pdf_hash
+    return result
 
 
 def check_duplicate_by_hash(extracted_json, index_data):
@@ -402,9 +488,10 @@ def check_duplicate_by_hash(extracted_json, index_data):
     返回 (is_duplicate, conflicting_doc)
     """
     hashes = compute_content_hash_from_pages(extracted_json)
-    if not hashes or (hashes["page1"] is None and hashes["page2"] is None):
+    if not hashes:
         return False, None  # 无法提取，无从对比，不拦截
 
+    # 优先用文本哈希比对（前两页内容哈希）
     for doc in index_data.get("documents", []):
         stored = doc.get("content_hash", {})
         if not stored or not isinstance(stored, dict):
@@ -414,7 +501,15 @@ def check_duplicate_by_hash(extracted_json, index_data):
         p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
 
         if p1_match and p2_match:
-            return True, doc  # 两页均相同，判定为重复
+            return True, doc  # 两页文本均相同，判定为重复
+    
+    # 保底：PDF 字节哈希比对（全扫描文档，无可提取文本时）
+    pdf_byte = hashes.get("pdf_byte")
+    if pdf_byte:
+        for doc in index_data.get("documents", []):
+            stored = doc.get("content_hash", {})
+            if stored.get("pdf_byte") == pdf_byte:
+                return True, doc  # PDF 字节完全相同，判定为重复
 
     return False, None
 
