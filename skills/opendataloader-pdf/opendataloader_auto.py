@@ -726,6 +726,8 @@ def extract_excel_to_json(xlsx_path: str) -> dict:
             "col_count": len(headers),
             "headers": headers,
             "data_rows": serializable_rows,     # 结构化数组，AI 可直接分析
+            # 统一 table_data 格式（与其他来源一致，方便下游处理）
+            "table_data": [headers] + serializable_rows if headers or serializable_rows else [],
             "section_path": f"Excel > {Path(xlsx_path).stem} > {sheet_name}",
         })
         table_count += 1
@@ -1367,6 +1369,36 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
 
     # 全部是 digital 页 → qwen2.5vl（保表格结构），opendataloader 作备选
     if not scanned_pages:
+        # 检查 VRAM 是否足够运行 qwen2.5vl（需要 ~18GB free）
+        _vram_ok = False
+        try:
+            sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
+            from vram_manager import VMgr
+            _vm = VMgr()
+            _status = _vm.status()
+            _vram_free = _status.get("vram_free_mb", 0)
+            _vram_ok = _vram_free >= 18000  # 至少 18GB free 才尝试
+            print(f"[      ] VRAM free: {_vram_free}MB, {'足够' if _vram_ok else '不足'} → {'qwen2.5vl' if _vram_ok else 'opendataloader'}")
+        except Exception:
+            pass  # 无法检测，降级到 opendataloader
+
+        if not _vram_ok:
+            print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，VRAM 不足 → opendataloader fast（表格结构可能丢失）...")
+            detection = {"type": "digital", "lang": lang, "total_pages": total}
+            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
+            env = os.environ.copy()
+            env["JAVA_HOME"] = JAVA_HOME
+            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+                if proc.returncode == 0:
+                    result["success"] = True
+                    result["mode_used"] = "per-page-digital-only"
+                    return result
+            except Exception as e:
+                print(f"[警告] opendataloader 失败: {e}", file=sys.stderr)
+            return result
+
         print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，用 qwen2.5vl 保表格结构...")
         ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
         if ocr_result.get("success") and ocr_result.get("json_path"):
