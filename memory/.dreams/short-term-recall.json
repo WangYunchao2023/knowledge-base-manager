@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-04-24T07:42:57.581Z",
+  "updatedAt": "2026-04-24T09:04:54.620Z",
   "entries": {
     "memory:memory/2026-03-26.md:1:19": {
       "key": "memory:memory/2026-03-26.md:1:19",
@@ -1631,15 +1631,16 @@
       "endLine": 15,
       "source": "memory",
       "snippet": "# 2026-03-19 工作日志 ## 任务：优化 web-access skill ### 完成的工作 1. **CDE网站高反爬问题解决** - 发现CDE网站使用JavaScript混淆 + 严格反爬检测 - headless模式无法获取内容 - **解决方案**：使用非headless模式 + 增强反检测脚本 2. **下载成功** - 成功下载2026年3月9日CDE发布的5个指导原则文件： - 治疗用重组蛋白药物上市许可申请质量综述资料撰写指导原则（征求意见稿）.pdf - 生物类似药上市许可申请质量综述资料撰写指导原则（征求意见稿）.pdf",
-      "recallCount": 1,
+      "recallCount": 2,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 0.5929709419608116,
+      "totalScore": 1.098539485037327,
       "maxScore": 0.5929709419608116,
       "firstRecalledAt": "2026-04-24T00:57:41.636Z",
-      "lastRecalledAt": "2026-04-24T00:57:41.636Z",
+      "lastRecalledAt": "2026-04-24T09:04:54.620Z",
       "queryHashes": [
-        "0a75aeefa838"
+        "0a75aeefa838",
+        "b5ceffdaa1d8"
       ],
       "recallDays": [
         "2026-04-24"
@@ -1808,6 +1809,99 @@
         "过滤",
         "逻辑",
         "any"
+      ]
+    },
+    "memory:memory/2026-03-19.md:30:41": {
+      "key": "memory:memory/2026-03-19.md:30:41",
+      "path": "memory/2026-03-19.md",
+      "startLine": 30,
+      "endLine": 41,
+      "source": "memory",
+      "snippet": "### 技术细节 - CDE网站使用JavaScript混淆 + 反爬检测 - 非headless模式可绕过检测 - 日期格式：\"> 2026.03 09\" (注意空格) - 下载需要携带Cookie ### 文件位置 - 下载目录：`~/Documents/工作/法规指导原则/` - Skill目录：`~/.openclaw/workspace-cortana/skills/web-access/`",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.5233847051858902,
+      "maxScore": 0.5233847051858902,
+      "firstRecalledAt": "2026-04-24T09:04:54.620Z",
+      "lastRecalledAt": "2026-04-24T09:04:54.620Z",
+      "queryHashes": [
+        "b5ceffdaa1d8"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "2026.03",
+        "documents/工作/法规指导原则",
+        "技术",
+        "细节",
+        "cde",
+        "网站",
+        "使用",
+        "javascript"
+      ]
+    },
+    "memory:memory/2026-04-24.md:74:84": {
+      "key": "memory:memory/2026-04-24.md:74:84",
+      "path": "memory/2026-04-24.md",
+      "startLine": 74,
+      "endLine": 84,
+      "source": "memory",
+      "snippet": "| v3.0.0 | 2026-04-24 | 新增自动分类目录（化学药/中药/生物制品/通用）；支持多分类子目录；章节+页码索引 | | v2.0.0 | 2026-04-24 | 去飞书 + graphify/dify 钩子 + watchdog 监控进程 | | v1.0.0 | 2026-04-02 | 整合版：原始文件归档 + opendataloader 提取 + 索引更新 + 飞书同步 | ## 教训 - graphify 触发不能用 cron 每分钟轮询，应该像索引更新一样事件驱动（串行触发） - subagent spawn 需要正确配置，当前用 nohup openclaw agent 后台执行代替 - 分类目录设计应与 metadata category 一致，避免路径不一致问题 ## 7. impurity-data-check skill 重大重构（v0.9.3 → v0.9.4）",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.5183914542198181,
+      "maxScore": 0.5183914542198181,
+      "firstRecalledAt": "2026-04-24T09:04:54.620Z",
+      "lastRecalledAt": "2026-04-24T09:04:54.620Z",
+      "queryHashes": [
+        "b5ceffdaa1d8"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "v3.0.0",
+        "化学药/中药/生物制品/通用",
+        "v2.0.0",
+        "graphify/dify",
+        "v1.0.0",
+        "impurity-data-check",
+        "v0.9.3",
+        "v0.9.4"
+      ]
+    },
+    "memory:memory/2026-04-14.md:22:31": {
+      "key": "memory:memory/2026-04-14.md:22:31",
+      "path": "memory/2026-04-14.md",
+      "startLine": 22,
+      "endLine": 31,
+      "source": "memory",
+      "snippet": "### 完成内容 - 创建主 Skill：`~/.openclaw/workspace/skills/markdown-graph-viewer/` - 调度15个子 Skill（archimate/architecture/bpmn/canvas/cloud/data-analytics/graphviz/infocard/infographic/iot/mindmap/network/security/uml/vega） - 子 Skill 位于：`/home/wangyc/.agents/skills/` - 决策逻辑：需求模糊时激活主 Skill → 分析意图 → 调用对应子 Skill ### 飞书兼容策略（v2.0.0 起） - **截图**：PlantUML/HTML 渲染 PNG（不支持 Mermaid 的图） - **Mermaid**：简单流程图/时序图转 Mermaid（可直接插入飞书文本绘图） - **手动重建**：mindmap 提供节点结构清单（飞书思维导图无法自动转）",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.5141208291053772,
+      "maxScore": 0.5141208291053772,
+      "firstRecalledAt": "2026-04-24T09:04:54.620Z",
+      "lastRecalledAt": "2026-04-24T09:04:54.620Z",
+      "queryHashes": [
+        "b5ceffdaa1d8"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "network",
+        "home/wangyc",
+        "agents/skills",
+        "v2.0.0",
+        "plantuml/html",
+        "简单流程图/时序图转",
+        "完成",
+        "内容"
       ]
     }
   }
