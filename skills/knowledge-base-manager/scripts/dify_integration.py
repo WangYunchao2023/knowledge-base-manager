@@ -28,7 +28,7 @@ from pathlib import Path
 
 # ============ 配置区 ============
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
-DIFY_EXTRACTED_DIR = os.path.join(KB_ROOT, "稳定性指导原则", "供AI用信息")
+DIFY_EXTRACTED_DIR = os.path.join(KB_ROOT, "稳定性", "供AI用信息")
 
 # Dify 配置（环境变量 / 这里硬编码二选一）
 DIFY_API_URL = os.environ.get("DIFY_API_URL", "http://localhost/v1")

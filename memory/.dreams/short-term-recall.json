@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-04-24T00:57:41.636Z",
+  "updatedAt": "2026-04-24T07:42:57.581Z",
   "entries": {
     "memory:memory/2026-03-26.md:1:19": {
       "key": "memory:memory/2026-03-26.md:1:19",
@@ -819,20 +819,22 @@
       "endLine": 126,
       "source": "memory",
       "snippet": "└── stability_plans/ # 生成的稳定性计划（输出物） └── {计划名称}/ └── {计划名称}_稳定性计划.md ``` ### 知识库（独立维护，位于 workspace/skills/） | Skill | 版本 | 用途 | |-------|------|------| | `knowledge-base-manager` | v1.0.0 | 知识库全流程管理（归档→提取→索引→同步）| | `opendataloader-pdf` | - | 文档解析提取 | | `guidance-web-access` | - | 法规网页访问下载 | ### 已生成的文件 - **稳定性方案初稿**： `~/Documents/工作/0 库/法规指导原则规定知识库/稳定性指导原则/稳定性计划/20260401_稳定性研究方案_初稿.md`",
-      "recallCount": 2,
+      "recallCount": 3,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 1.1570084989070892,
-      "maxScore": 0.6156825453042983,
+      "totalScore": 1.776676183193922,
+      "maxScore": 0.6196676842868327,
       "firstRecalledAt": "2026-04-15T05:57:43.968Z",
-      "lastRecalledAt": "2026-04-23T00:39:18.008Z",
+      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
       "queryHashes": [
         "8c5700ee9c54",
-        "35e00c0abcf0"
+        "35e00c0abcf0",
+        "18bb39299e8f"
       ],
       "recallDays": [
         "2026-04-15",
-        "2026-04-23"
+        "2026-04-23",
+        "2026-04-24"
       ],
       "conceptTags": [
         "stability-plans",
@@ -1376,19 +1378,21 @@
       "endLine": 26,
       "source": "memory",
       "snippet": "# 2026-04-17 日志 --- ## 17:21 - 会话内容保存 将今日与非临床试验项目管理Agent相关的会话记录保存到： `~/.openclaw/workspace/agents/nonclinical-study-manager/docs/session-2026-04-17.md` --- ## 17:06 - CRO报价汇总表创建 创建了飞书多维表格用于CRO报价汇总： - **名称**：CRO报价汇总表 - **链接**：https://j0eukrlohu.feishu.cn/base/BrxNbnapvaxANlsHashcwqbDn5e - **App Token**：BrxNbnapvaxANlsHashcwqbDn5e --- ## 15:27 - CRO报价解析方案讨论 用户确认需要AI直接理解报价单内容提取信息的方案，更具通用性。 设计架构： 1. AI读取报价单（PDF/Word/Excel/图片）",
-      "recallCount": 2,
+      "recallCount": 3,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 1.161568036675453,
+      "totalScore": 1.7444241359829902,
       "maxScore": 0.5892684206366539,
       "firstRecalledAt": "2026-04-21T02:29:13.272Z",
-      "lastRecalledAt": "2026-04-21T02:30:12.771Z",
+      "lastRecalledAt": "2026-04-24T07:42:57.581Z",
       "queryHashes": [
         "76a15fb0f4c9",
-        "83768bddee0f"
+        "83768bddee0f",
+        "4fbb64a73822"
       ],
       "recallDays": [
-        "2026-04-21"
+        "2026-04-21",
+        "2026-04-24"
       ],
       "conceptTags": [
         "pdf/word/excel/图片",
@@ -1563,18 +1567,20 @@
       "endLine": 45,
       "source": "memory",
       "snippet": "- **Session 机制的问题**：CLI 每次调用是独立 subprocess，无法区分\"同会话优化\"和\"跨会话重复\"，所以不能依赖 session 文件做任务识别 - **版本号管理**：同一版本号的两次 commit 是不良实践，应该用新版本号 ## Project_Blueprint.md 更新状态 - stability-planner 版本已更新至 v5.1.0 - 模块清单变更日期未更新（下次注意）",
-      "recallCount": 1,
+      "recallCount": 2,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 0.6093819588422775,
+      "totalScore": 1.1721764028072357,
       "maxScore": 0.6093819588422775,
       "firstRecalledAt": "2026-04-23T00:39:18.008Z",
-      "lastRecalledAt": "2026-04-23T00:39:18.008Z",
+      "lastRecalledAt": "2026-04-24T07:42:57.581Z",
       "queryHashes": [
-        "35e00c0abcf0"
+        "35e00c0abcf0",
+        "4fbb64a73822"
       ],
       "recallDays": [
-        "2026-04-23"
+        "2026-04-23",
+        "2026-04-24"
       ],
       "conceptTags": [
         "project-blueprint.md",
@@ -1678,6 +1684,130 @@
         "变量",
         "问题",
         "记录"
+      ]
+    },
+    "memory:memory/2026-04-02.md:54:75": {
+      "key": "memory:memory/2026-04-02.md:54:75",
+      "path": "memory/2026-04-02.md",
+      "startLine": 54,
+      "endLine": 75,
+      "source": "memory",
+      "snippet": "用于搜索非临床安全性评价相关指导原则： - 急性毒性、长期毒性、重复给药毒性 - 安全药理学、毒代动力学 - 药代动力学、PK、ADME - 生殖毒性、遗传毒性、致癌性 - 刺激性、过敏性、溶血性 - 免疫毒性、光安全性 - QT间期、心室复极化 - 中药、天然药物 - 生物制品、抗体偶联药物、ADC - 纳米药物、脂质体药物 --- *最后更新：2026-04-02 10:48* --- ## 下午新增：药品稳定性研究自动化管理系统 (auto-stability-scheme) ### 项目概述",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.6490423500537872,
+      "maxScore": 0.6490423500537872,
+      "firstRecalledAt": "2026-04-24T07:42:48.974Z",
+      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
+      "queryHashes": [
+        "18bb39299e8f"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "auto-stability-scheme",
+        "用于",
+        "搜索",
+        "临床",
+        "安全",
+        "评价",
+        "相关",
+        "指导"
+      ]
+    },
+    "memory:memory/2026-04-04.md:14:31": {
+      "key": "memory:memory/2026-04-04.md:14:31",
+      "path": "memory/2026-04-04.md",
+      "startLine": 14,
+      "endLine": 31,
+      "source": "memory",
+      "snippet": "2. **同会话内优化**：Agent 在同一对话流中直接生成同名文件（覆盖） ### 文件命名 ``` {药品名}_{批号}_{条件}_稳定性计划.xlsx ``` - 批号中逗号转下划线，空格去除 - 条件中 `+` 转 `_`，`℃` 转 `C`，空格去除 ### 批号区分策略（最终设计） - 同一药品 + 不同批号 = 不同研究任务，各自独立文件 - 同一药品 + 同一批号 + 不同条件 = 不同研究任务（因为条件在文件名中不同） - 同一药品 + 同一批号 + 同一条件 = 同一任务（优化时覆盖） ### 代码库位置 `/home/wangyc/.openclaw/workspace/agents/auto-stability-scheme/` ### 版本记录",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.6129258796572685,
+      "maxScore": 0.6129258796572685,
+      "firstRecalledAt": "2026-04-24T07:42:48.974Z",
+      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
+      "queryHashes": [
+        "18bb39299e8f"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "稳定性计划.xlsx",
+        "home/wangyc",
+        "会话",
+        "同一",
+        "对话",
+        "直接",
+        "生成",
+        "同名"
+      ]
+    },
+    "memory:memory/2026-04-04.md:29:39": {
+      "key": "memory:memory/2026-04-04.md:29:39",
+      "path": "memory/2026-04-04.md",
+      "startLine": 29,
+      "endLine": 39,
+      "source": "memory",
+      "snippet": "`/home/wangyc/.openclaw/workspace/agents/auto-stability-scheme/` ### 版本记录 - v5.0.0：多源综合决策引擎 + 模块化重构 - v5.0.1：迭代优化时保留所有版本（后因需求不匹配撤销） - v5.0.2：会话版本管理重构（药品+批号做key）（后因需求不匹配撤销） - v5.1.0：跨会话不跟踪，磁盘扫描查重（药品+批号+条件） ## 今日教训 - **理解用户意图比写代码更重要**：花了大量时间在错误的理解上迭代 - **Session 机制的问题**：CLI 每次调用是独立 subprocess，无法区分\"同会话优化\"和\"跨会话重复\"，所以不能依赖 session 文件做任务识别",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.6103845477104186,
+      "maxScore": 0.6103845477104186,
+      "firstRecalledAt": "2026-04-24T07:42:48.974Z",
+      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
+      "queryHashes": [
+        "18bb39299e8f"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "home/wangyc",
+        "v5.0.0",
+        "v5.0.1",
+        "v5.0.2",
+        "v5.1.0",
+        "home",
+        "wangyc",
+        "openclaw"
+      ]
+    },
+    "memory:memory/2026-03-31.md:93:100": {
+      "key": "memory:memory/2026-03-31.md:93:100",
+      "path": "memory/2026-03-31.md",
+      "startLine": 93,
+      "endLine": 100,
+      "source": "memory",
+      "snippet": "- 修复有经验分支过滤逻辑，由 `any()` 改为 `all()`，确保多关键词 AND 匹配。 - 新增“附件级标题过滤”，在详情页下载前校验附件名是否含核心实体或为必要文档（正文/起草说明），减少无关下载。 #### 任务理解逻辑更新： - **简称/同义词识别**：Cortana 在接到任务时需智能识别简称（如“化药”->“化学药品”）并生成多策略关键词。 - **语言匹配原则**：明确“搜索词语言应与目标网站搜索界面语言一致”，不受任务下达语言限制（如访问 FDA 用英文搜索）。 ### 2. 架构决策与规范",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.609393098950386,
+      "maxScore": 0.609393098950386,
+      "firstRecalledAt": "2026-04-24T07:42:48.974Z",
+      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
+      "queryHashes": [
+        "18bb39299e8f"
+      ],
+      "recallDays": [
+        "2026-04-24"
+      ],
+      "conceptTags": [
+        "正文/起草说明",
+        "简称/同义词识别",
+        "修复",
+        "经验",
+        "分支",
+        "过滤",
+        "逻辑",
+        "any"
       ]
     }
   }

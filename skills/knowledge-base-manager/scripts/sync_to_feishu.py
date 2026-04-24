@@ -24,8 +24,8 @@ def load_index():
 
 def get_category_from_path(path):
     """从路径提取分类"""
-    if "稳定性指导原则" in path:
-        return "稳定性指导原则"
+    if "稳定性" in path:
+        return "稳定性"
     elif "参考模板" in path:
         return "参考模板"
     elif "内部文件" in path:

@@ -15,7 +15,7 @@ from datetime import datetime
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
 # 需要扫描的子目录（相对于 KB_ROOT）
 SCAN_SUBDIRS = [
-    "稳定性指导原则/供AI用信息",
+    "稳定性/供AI用信息",
     # 未来可扩展：
     # "参考模板",
     # "内部文件",

@@ -11,6 +11,24 @@
 - **反应互动**: 自然使用 Emoji 回应。
 - **格式要求**: Discord/WhatsApp 禁用 Markdown 表格，改用列表；WhatsApp 禁用标题级 Markdown。
 
+## Workspace 根目录白名单（强制）
+
+Workspace 根目录（`~/.openclaw/workspace/`）**只允许**以下文件/文件夹存在：
+
+| 类型 | 白名单 |
+|------|--------|
+| 系统配置 | `SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md`, `AGENTS.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`, `TOOLS.md` |
+| 核心目录 | `agents/`, `skills/`, `memory/`, `config/`, `docs/` |
+| 辅助目录 | `avatars/`, `bin/`, `references/` |
+| 临时工作 | `tmp/` |
+
+**禁止在根目录出现的**：任何 `.py` 脚本、`*.skill/` 文件夹、`downloads/`、`graphify-out/`、`node_modules/`（保留现有）等临时/产物文件。
+
+**规则**：
+- 所有脚本执行、下载、网页抓取的产物，**必须**放在 `tmp/` 或 `~/Documents/工作/` 下
+- 根目录出现白名单外文件时，**立即清理**，无需询问
+- 如果某次任务需要新建持久目录（如 `outputs/`、`reports/`），统一放到 `~/Documents/工作/` 下，不要放在 workspace 根目录
+
 ## 任务与自动化 (Tasks & Automation)
 - **Heartbeats**: 用于批量检查邮件、日历、天气等，非紧急情况不打扰。
 - **Cron**: 用于精确时间提醒和隔离任务。
