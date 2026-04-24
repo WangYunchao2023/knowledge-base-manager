@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""
+opendataloader_auto.py — v2.0.0 (2026-04-24)
+表格结构提取：qwen2.5vl OCR + table_data(2D数组) 降级备选opendataloader fast 模式。
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
 版本: 1.9.0
 日期: 2026-04-24
