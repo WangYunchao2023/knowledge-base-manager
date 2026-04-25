@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """opendataloader_auto.py v2.0.0 (2026-04-24)
-表格结构提取: qwen2.5vl OCR + table_data(2D数组), 降级备选opendataloader fast模式。
+表格结构提取: qwen2.5vl OCR + table_data(跨行跨列+展开), has_merged_cells标记, 增强表格解析。
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
 版本: 2.0.0
 日期: 2026-04-24
@@ -53,6 +53,54 @@ def _parse_markdown_table(md_text: str) -> list:
     return rows
 
 
+def _parse_table_data(raw_data):
+    """
+    统一解析 table_data 字段，支持两种格式：
+    - 简单格式: [["列1","列2"], ["值1","值2"]]       → 直接返回，has_span=False
+    - 增强格式: [{"cells":[...],"col_span":[...],"row_span":[...]}] → 展开为 2D 数组
+
+    返回: (flat_2d_array, has_merged_cells: bool)
+    has_merged_cells=True 表示该表格存在跨行/跨列单元格
+    """
+    if not raw_data or not isinstance(raw_data, list):
+        return [], False
+    if raw_data and isinstance(raw_data[0], list):
+        return raw_data, False
+    try:
+        total_cols = 0
+        for row_obj in raw_data:
+            cells = row_obj.get("cells", [])
+            col_span = row_obj.get("col_span", [])
+            if col_span and len(col_span) == len(cells):
+                total_cols = max(total_cols, sum(col_span))
+            else:
+                total_cols = max(total_cols, len(cells))
+        flat = []
+        has_span = False
+        for row_obj in raw_data:
+            cells = row_obj.get("cells", [])
+            col_sp = row_obj.get("col_span", [1] * len(cells))
+            row_sp = row_obj.get("row_span", [1] * len(cells))
+            flat_row = []
+            col_ptr = 0
+            for i, cell in enumerate(cells):
+                cs = col_sp[i] if i < len(col_sp) else 1
+                rs = row_sp[i] if i < len(row_sp) else 1
+                if cs > 1 or rs > 1:
+                    has_span = True
+                flat_row.append(cell)
+                for _ in range(cs - 1):
+                    flat_row.append("")
+                col_ptr += cs
+            while len(flat_row) < total_cols:
+                flat_row.append("")
+            flat.append(flat_row)
+        return flat, has_span
+    except Exception:
+        return [], False
+
+
+
 # ---------- Java 路径 ----------
 JAVA_BIN = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64/bin/java"
 JAVA_HOME = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64"
@@ -94,16 +142,28 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
   "page": <页码>,
   "blocks": [
     {"type": "text", "content": "<识别的文本段落>", "heading": "<如果是标题则填入标题文本，否则空字符串>"},
-    {"type": "table", "content": "<表格的纯文本表示，每行用换行分隔>", "table_data": [["列1", "列2", "列3"], ["值1", "值2", "值3"], ["值4", "值5", "值6"]]}
+    {
+      "type": "table",
+      "content": "<表格的纯文本表示，每行用换行分隔>",
+      "table_data": [
+        {"cells": ["列1", "列2", "列3"], "col_span": [1, 1, 1], "row_span": [1, 1, 1]},
+        {"cells": ["值1", "值2", "值3"], "col_span": [1, 2, 1], "row_span": [1, 1, 1]}
+      ]
+    }
   ]
 }
 ```
 重要规则：
 1. 只输出 JSON，不要任何解释
-2. table 块必须同时提供 content（纯文本）和 table_data（2D 数组），缺一不可
+2. table 块必须同时提供 content（纯文本）和 table_data（对象数组），缺一不可
 3. table_data 每个单元格必须是字符串，空单元格用 "" 表示
-4. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
-5. 识别所有中英文内容，数字、符号、化学式都要准确"""
+4. col_span / row_span 均为整数数组，长度与 cells 相同：
+   - col_span[i]=N 表示该单元格从当前列起占据 N 列（跨列）
+   - row_span[i]=N 表示该单元格从当前行起占据 N 行（跨行）
+   - 跨行/跨列的单元格在其所跨越的后续位置不再重复出现
+   - 解析规则：按行展开；若 col_span=[1,2,1]，第1列正常，第2列跨2列（填入内容，后续位置跳过），第3列正常
+5. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
+6. 识别所有中英文内容，数字、符号、化学式都要准确"""
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
@@ -257,11 +317,11 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     total_tables += 1
                     elem = {"type": "table", "content": bcontent,
                         "page_number": page_num, "table_index": total_tables}
-                    table_data = block.get("table_data")
-                    if table_data and isinstance(table_data, list):
-                        elem["table_data"] = table_data
-                    else:
-                        elem["table_data"] = _parse_markdown_table(bcontent)
+                    raw_td = block.get("table_data", [])
+                    table_data, has_span = _parse_table_data(raw_td)
+                    elem["table_data"] = table_data
+                    elem["has_merged_cells"] = has_span
+                    elem["_raw_td"] = raw_td
                     all_elements.append(elem)
 
             print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
@@ -1313,6 +1373,8 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
             merged_kids.append(elem)
             if elem.get("type") == "table":
                 total_tables += 1
+                if elem.get("has_merged_cells"):
+                    total_merged_tables += 1
             elif elem.get("type") == "paragraph":
                 total_paras += 1
 
@@ -1326,6 +1388,7 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
         "total_tables": total_tables,
         "total_paragraphs": total_paras,
         "kids": merged_kids,
+        "total_merged_tables": total_merged_tables,
         "_digital_kids_count": len(digital_kids),
         "_ocr_kids_count": len(ocr_kids),
     }

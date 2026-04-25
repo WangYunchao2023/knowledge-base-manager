@@ -18,3 +18,10 @@
 ## 2026-04-19
 - PDF detection/processing: some files returned HTML (b'<!DOC') instead of valid PDF. Check if source URLs are broken or if there's a redirect issue.
 - Graphify large corpus processing completed: 7186 files / 28M words, needs_graph=true
+
+## 2026-04-25
+
+### 数据展示禁止主动推测
+**问题**: 在展示药品检测数据时，将"高温"标签推测为"高温（40°C）"，凭空添加了原文中不存在的温度数值
+
+**教训**: 提取和展示数据时，只呈现原文明确存在的内容。任何推断性信息（温度、浓度、实验条件、ICH标准等）必须注明来源或标注"基于推测"，绝不能以确定语气呈现

@@ -42,6 +42,7 @@
 | 2026-04-24 | **VRAM协调**：qwen2.5vl OCR前必须调用vram_manager让出显存，否则OOM；VRAM恢复用try/finally确保执行 |
 | 2026-04-24 | **opendataloader --pages参数**：会导致所有元素page_number=None，需要后处理补全页码（文本匹配+顺序分配） |
 | 2026-04-24 | **vram_manager调用**：路径`/home/wangyc/.openclaw/scripts/vram_manager.py`；推荐CLI模式`python3 ~/.openclaw/scripts/vram_manager.py acquire|release|status`跨session调用 |
+| 2026-04-25 | **数据展示禁止主动推测**：检索和展示数据时，只呈现文件原文提取的原始值和标签，不得推测、填补或脑补附加信息（如温度、浓度、实验条件等未在原文中明确的内容） |
 
 ## 会话保存规范
 
