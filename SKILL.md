@@ -228,7 +228,7 @@ python3 dify_integration.py --sync      # 同步所有 .md 到 Dify
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| **v3.1.0** | **2026-04-25** | **内容哈希升级：PDF前两页逐页比对 + 提取失败自动重试 + 三段采样检测** |
+| **v3.1.0** | **2026-04-25** | **逐页自适应提取（process_pdf_per_page）：每页独立判断digital/scanned，无采样；内容哈希去重 + 提取失败自动重试** |
 | **v2.1.0** | **2026-04-24** | **全自动 graphify 触发：job queue + cron + openclaw agent 后台执行** |
 | v2.0.0 | 2026-04-24 | 去飞书 + 加 graphify/dify 钩子 + watchdog 监控进程 |
 | v1.0.0 | 2026-04-02 | 整合版：原始文件归档 + opendataloader 提取 + 索引更新 + 飞书同步 |

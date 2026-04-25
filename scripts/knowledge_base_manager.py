@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 3.1.0
 功能: 法规指导原则知识库管理器
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
@@ -199,13 +199,92 @@ def ensure_category_dirs(kb_root, category):
 
 # ---- opendataloader ----
 
+def _validate_extraction(extracted_base, output_dir):
+    """
+    验证 opendataloader 提取结果是否有效。
+    返回 (is_valid, error_msg)。
+    """
+    json_path = os.path.join(output_dir, extracted_base + ".json")
+    md_path = os.path.join(output_dir, extracted_base + ".md")
+
+    if not os.path.exists(json_path):
+        return False, f"JSON 文件未生成: {json_path}"
+
+    # 内容有效性检查（读全文，避免截断导致解析失败）
+    with open(json_path, "r", encoding="utf-8", errors="replace") as f:
+        raw = f.read()
+    if not raw.strip() or raw == "{\n}":
+        return False, "JSON 内容为空"
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, "JSON 解析失败"
+
+    # 检查 kids 是否为空（PDF）或 elements 是否为空（DOCX）
+    kids = data.get("kids", data.get("flat_elements", []))
+    if isinstance(kids, list) and len(kids) == 0:
+        return False, "JSON 无段落内容（kids/elements 均为空）"
+
+    # 检查 .md 是否为空
+    if os.path.exists(md_path):
+        md_size = os.path.getsize(md_path)
+        if md_size < 100:
+            return False, f".md 内容过少（{md_size} bytes）"
+
+    return True, "OK"
+
+
 def run_opendataloader(input_file, output_dir, force_mode=None):
     """
     调用 opendataloader 提取内容。
-    若提取内容为空，自动升级模式重试：
-      digital → hybrid（扫描 PDF 误判）
-      fast    → hybrid（复杂文档）
+
+    PDF 使用逐页自适应处理（process_pdf_per_page）：
+      - 每页独立判断：digital（有文字）→ opendataloader 快速提取
+      - scanned（纯图像）→ qwen2.5vl OCR
+      - 混合 PDF → 两种方式结合，保留最佳文本
+      - 无采样，不依赖封面/目录，全自动判断
+
+    DOCX 沿用 subprocess 调用（opendataloader CLI）。
     """
+    ext = os.path.splitext(input_file)[1].lower()
+    extracted_base = os.path.splitext(os.path.basename(input_file))[0]
+
+    # ---- PDF：逐页自适应处理 ----
+    if ext == ".pdf":
+        import sys as _sys
+        _od_dir = str(Path(OPENDATALOADER_SCRIPT).parent)
+        if _od_dir not in _sys.path:
+            _sys.path.insert(0, _od_dir)
+
+        try:
+            from opendataloader_auto import process_pdf_per_page
+        except ImportError as e:
+            return False, f"无法导入 process_pdf_per_page: {e}"
+
+        try:
+            od_result = process_pdf_per_page(
+                pdf_path=input_file,
+                output_dir=output_dir,
+                output_format="markdown,json",
+                force_qwen=False,   # digital-only 时允许降级到 opendataloader（快）
+                skip_server=False
+            )
+        except Exception as e:
+            return False, f"process_pdf_per_page 异常: {e}"
+
+        if not od_result.get("success"):
+            mode_used = od_result.get("mode_used", "unknown")
+            return False, f"per-page 提取失败（mode={mode_used}）"
+
+        # 验证输出文件
+        is_valid, err = _validate_extraction(extracted_base, output_dir)
+        if not is_valid:
+            return False, f"per-page 提取结果验证失败: {err}"
+
+        return True, f"per-page（{od_result.get('mode_used', 'adaptive')}）"
+
+    # ---- DOCX/DOC：subprocess 调用 ----
     for attempt in range(2):
         cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
         if force_mode:
@@ -215,35 +294,9 @@ def run_opendataloader(input_file, output_dir, force_mode=None):
             if result.returncode != 0:
                 return False, result.stderr
 
-            # 验证提取结果是否有效
-            extracted_base = os.path.splitext(os.path.basename(input_file))[0]
-            json_path = os.path.join(output_dir, extracted_base + ".json")
-            md_path = os.path.join(output_dir, extracted_base + ".md")
-
-            if not os.path.exists(json_path):
-                return False, f"JSON 文件未生成: {json_path}"
-
-            # 内容有效性检查（读全文，避免截断导致解析失败）
-            with open(json_path, "r", encoding="utf-8", errors="replace") as f:
-                raw = f.read()
-            if not raw.strip() or raw == "{\n}":
-                raise ValueError("JSON 内容为空")
-
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                raise ValueError("JSON 解析失败")
-
-            # 检查 kids 是否为空（PDF）或 elements 是否为空（DOCX）
-            kids = data.get("kids", data.get("flat_elements", []))
-            if isinstance(kids, list) and len(kids) == 0:
-                raise ValueError("JSON 无段落内容（kids/elements 均为空）")
-
-            # 检查 .md 是否为空
-            if os.path.exists(md_path):
-                md_size = os.path.getsize(md_path)
-                if md_size < 100:
-                    raise ValueError(f".md 内容过少（{md_size} bytes）")
+            is_valid, err = _validate_extraction(extracted_base, output_dir)
+            if not is_valid:
+                raise ValueError(err)
 
             return True, result.stdout
 
@@ -252,11 +305,11 @@ def run_opendataloader(input_file, output_dir, force_mode=None):
         except Exception as e:
             last_err = str(e)
 
-        # 重试逻辑：digital → hybrid
+        # 重试：digital → hybrid
         if force_mode is None:
             force_mode = "hybrid"
         else:
-            break  # 第二次仍然失败，放弃
+            break
 
     return False, f"提取失败（已重试）: {last_err}"
 
