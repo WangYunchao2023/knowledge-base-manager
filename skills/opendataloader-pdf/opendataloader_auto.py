@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """opendataloader_auto.py v2.0.0 (2026-04-24)
-表格结构提取: qwen2.5vl OCR + table_data(跨行跨列+展开), has_merged_cells标记, 增强表格解析。
+表格结构提取: qwen2.5vl OCR + cell_bbox(坐标), col_span/row_span, 嵌套表头检测, 斜线表头检测, has_merged_cells标记。
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
 版本: 2.0.0
 日期: 2026-04-24
@@ -100,6 +100,115 @@ def _parse_table_data(raw_data):
         return [], False
 
 
+def _analyze_table_structure(raw_td):
+    """
+    基于 cell_bbox 和 col_span/row_span 分析表格结构。
+    返回:
+      header_depth: int         # 表头行数
+      has_nested_headers: bool   # 是否存在嵌套表头
+      has_diagonal_header: bool   # 是否存在斜线表头
+      col_groups: list         # 列分组 [[父col_idx, [子col_idx...]], ...]
+    """
+    result = {
+        "header_depth": 1,
+        "has_nested_headers": False,
+        "has_diagonal_header": False,
+        "col_groups": [],
+    }
+    if not raw_td or not isinstance(raw_td, list):
+        return result
+
+    bboxes = []
+    for row in raw_td:
+        if isinstance(row, dict) and row.get("cell_bbox"):
+            bboxes.append(row["cell_bbox"])
+        else:
+            bboxes.append(None)
+
+    # 估算表格总列数
+    total_cols = 0
+    for ri, row in enumerate(raw_td):
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("cells", [])
+        cs = row.get("col_span", [])
+        if cs and len(cs) == len(cells):
+            total_cols = max(total_cols, sum(cs))
+        else:
+            total_cols = max(total_cols, len(cells))
+
+    # 斜线表头检测
+    for ri, row in enumerate(raw_td):
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("cells", [])
+        bb = bboxes[ri] if ri < len(bboxes) else None
+        if not bb or len(cells) < 2:
+            continue
+        non_empty = [(i, c, bb[i]) for i, c in enumerate(cells)
+                     if c and isinstance(bb[i], (list, tuple)) and len(bb[i]) >= 4]
+        if len(non_empty) < 2:
+            continue
+        for k in range(len(non_empty) - 1):
+            i1, c1, b1 = non_empty[k]
+            i2, c2, b2 = non_empty[k + 1]
+            y1b, y1t = b1[1], b1[3]
+            y2b, y2t = b2[1], b2[3]
+            if abs(y1b - y2b) > 5 and abs(y1t - y2t) < 10:
+                result["has_diagonal_header"] = True
+                break
+
+    # 嵌套表头检测
+    header_depth = 1
+    for ri, row in enumerate(raw_td):
+        if not isinstance(row, dict):
+            continue
+        rs = row.get("row_span", [])
+        cells = row.get("cells", [])
+        if not cells:
+            continue
+        if rs and all(r > 1 for r in rs):
+            header_depth = max(header_depth, ri + 1)
+
+    # 通过 col_span 推断列分组
+    col_groups = []
+    span_col_map = {}
+    for ri, row in enumerate(raw_td):
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("cells", [])
+        cs = row.get("col_span", [1] * len(cells))
+        col_ptr = 0
+        for i, cell in enumerate(cells):
+            cs_val = cs[i] if i < len(cs) else 1
+            if cs_val > 1:
+                span_col_map[col_ptr] = {"row": ri, "cell": cell, "col_span": cs_val, "children": []}
+            col_ptr += cs_val
+
+    for start_col, info in span_col_map.items():
+        span_len = info["col_span"]
+        children = []
+        for ri2, row2 in enumerate(raw_td):
+            if not isinstance(row2, dict) or ri2 <= info["row"]:
+                continue
+            cells2 = row2.get("cells", [])
+            cs2 = row2.get("col_span", [1] * len(cells2))
+            col_ptr2 = 0
+            for i2, cell2 in enumerate(cells2):
+                rcs_val = cs2[i2] if i2 < len(cs2) else 1
+                if col_ptr2 >= start_col and col_ptr2 < start_col + span_len and rcs_val == 1 and cell2:
+                    children.append(col_ptr2)
+                col_ptr2 += rcs_val
+        info["children"] = sorted(set(children))
+        if children or info["col_span"] > 1:
+            col_groups.append([start_col, info["children"]])
+
+    if header_depth > 1 or col_groups:
+        result["has_nested_headers"] = True
+    result["col_groups"] = col_groups
+    result["header_depth"] = max(header_depth, 1)
+    return result
+
 
 # ---------- Java 路径 ----------
 JAVA_BIN = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64/bin/java"
@@ -146,8 +255,18 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
       "type": "table",
       "content": "<表格的纯文本表示，每行用换行分隔>",
       "table_data": [
-        {"cells": ["列1", "列2", "列3"], "col_span": [1, 1, 1], "row_span": [1, 1, 1]},
-        {"cells": ["值1", "值2", "值3"], "col_span": [1, 2, 1], "row_span": [1, 1, 1]}
+        {
+          "cells": ["列1", "列2", "列3"],
+          "col_span": [1, 1, 1],
+          "row_span": [1, 1, 1],
+          "cell_bbox": [[10, 20, 80, 35], [85, 20, 155, 35], [160, 20, 230, 35]]
+        },
+        {
+          "cells": ["值1", "值2", "值3"],
+          "col_span": [1, 2, 1],
+          "row_span": [1, 1, 1],
+          "cell_bbox": [[10, 40, 80, 55], [85, 40, 230, 55]]
+        }
       ]
     }
   ]
@@ -157,13 +276,23 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
 1. 只输出 JSON，不要任何解释
 2. table 块必须同时提供 content（纯文本）和 table_data（对象数组），缺一不可
 3. table_data 每个单元格必须是字符串，空单元格用 "" 表示
-4. col_span / row_span 均为整数数组，长度与 cells 相同：
+4. cell_bbox（强烈建议提供）：每个单元格的边界框坐标数组，单位为点数（pt），格式为 [left, bottom, right, top]，坐标原点为页面左下角。
+   - 若某行未提供 cell_bbox，则用前一行的 bbox 按行号递推估算（行间距默认20pt）
+   - 若 cell_bbox 列数与 cells 列数不一致，以 cells 为准，bbox 多余部分忽略，少则按列均分
+5. col_span / row_span 均为整数数组，长度与 cells 相同：
    - col_span[i]=N 表示该单元格从当前列起占据 N 列（跨列）
    - row_span[i]=N 表示该单元格从当前行起占据 N 行（跨行）
    - 跨行/跨列的单元格在其所跨越的后续位置不再重复出现
    - 解析规则：按行展开；若 col_span=[1,2,1]，第1列正常，第2列跨2列（填入内容，后续位置跳过），第3列正常
-5. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
-6. 识别所有中英文内容，数字、符号、化学式都要准确"""
+6. 嵌套表头检测规则：
+   - 若某行所有列的 row_span > 1，表示该行是上级表头行，其下各行属于该表头的子列
+   - 若一行的多个连续列 col_span > 1 且内容简洁（≤4字符），这些列可能是下级表头
+   - 典型嵌套结构：第1行["项目","  ","统计分析"] + 第2行["  ","A组","B组"]
+7. 斜线表头检测规则：
+   - 若表头某行存在单元格左下角(x1,y1)和右上角(x2,y2)，且y1>y2，则该单元格为斜线表头
+   - 斜线表头的 cells 数组内相邻非空元素的水平投影应有一定间隔（≥表格宽度的1/4）
+8. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
+9. 识别所有中英文内容，数字、符号、化学式都要准确"""
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
@@ -322,6 +451,12 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     elem["table_data"] = table_data
                     elem["has_merged_cells"] = has_span
                     elem["_raw_td"] = raw_td
+                    elem["_cell_bboxes"] = [row.get("cell_bbox") for row in raw_td if isinstance(row, dict)]
+                    structure = _analyze_table_structure(raw_td)
+                    elem["header_depth"] = structure.get("header_depth", 1)
+                    elem["has_nested_headers"] = structure.get("has_nested_headers", False)
+                    elem["has_diagonal_header"] = structure.get("has_diagonal_header", False)
+                    elem["col_groups"] = structure.get("col_groups", [])
                     all_elements.append(elem)
 
             print(f"[INFO] 第 {page_num}/{total_pages} 页完成")
@@ -1375,6 +1510,10 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
                 total_tables += 1
                 if elem.get("has_merged_cells"):
                     total_merged_tables += 1
+                if elem.get("has_nested_headers"):
+                    total_nested_tables += 1
+                if elem.get("has_diagonal_header"):
+                    total_diagonal_tables += 1
             elif elem.get("type") == "paragraph":
                 total_paras += 1
 
@@ -1389,6 +1528,8 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
         "total_paragraphs": total_paras,
         "kids": merged_kids,
         "total_merged_tables": total_merged_tables,
+        "total_nested_tables": total_nested_tables,
+        "total_diagonal_tables": total_diagonal_tables,
         "_digital_kids_count": len(digital_kids),
         "_ocr_kids_count": len(ocr_kids),
     }
