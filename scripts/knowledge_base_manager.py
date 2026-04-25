@@ -223,14 +223,14 @@ def run_opendataloader(input_file, output_dir, force_mode=None):
             if not os.path.exists(json_path):
                 return False, f"JSON 文件未生成: {json_path}"
 
-            # 内容有效性检查
+            # 内容有效性检查（读全文，避免截断导致解析失败）
             with open(json_path, "r", encoding="utf-8", errors="replace") as f:
-                raw = f.read(500)
+                raw = f.read()
             if not raw.strip() or raw == "{\n}":
                 raise ValueError("JSON 内容为空")
 
             try:
-                data = json.loads(raw if len(raw) > 50 else open(json_path).read())
+                data = json.loads(raw)
             except json.JSONDecodeError:
                 raise ValueError("JSON 解析失败")
 
@@ -267,7 +267,7 @@ def load_index():
         with open(INDEX_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {
-        "version": "3.0",
+        "version": "3.1",
         "last_updated": "",
         "kb_root": KB_ROOT,
         "total_docs": 0,
@@ -756,7 +756,7 @@ def main():
     if "--rebuild" in args:
         log("重建索引模式", "🔨")
         index_data = {
-            "version": "3.0",
+            "version": "3.1",
             "last_updated": "",
             "kb_root": KB_ROOT,
             "total_docs": 0,
