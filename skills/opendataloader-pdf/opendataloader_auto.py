@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""opendataloader_auto.py v2.0.0 (2026-04-24)
+"""opendataloader_auto.py v2.3.0 (2026-04-25)
 表格结构提取: qwen2.5vl OCR + cell_bbox(坐标), col_span/row_span, 嵌套表头检测, 斜线表头检测, has_merged_cells标记。
 文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
 版本: 2.0.0
@@ -210,6 +210,61 @@ def _analyze_table_structure(raw_td):
     return result
 
 
+
+
+def _merge_consecutive_tables(elements: list) -> list:
+    """
+    检测并合并跨页表格。
+    规则：
+      - 连续两页出现相似结构的表格（列数相近或表头前缀相同）→ 合并
+      - 合并后表格保留 continued_from / continued_on_page 标记
+      - _segments 记录每段来源页码，方便回溯
+    """
+    if not elements:
+        return elements
+    result = []
+    i = 0
+    while i < len(elements):
+        elem = elements[i]
+        if elem.get("type") != "table" or elem.get("ocr_confidence") == "low":
+            result.append(elem)
+            i += 1
+            continue
+        page_num = elem.get("page_number", 0)
+        table_data = elem.get("table_data", [])
+        content_preview = (elem.get("content") or "")[:60].strip()
+        if i + 1 < len(elements):
+            nxt = elements[i + 1]
+            if (nxt.get("type") == "table"
+                    and nxt.get("page_number", 0) == page_num + 1
+                    and nxt.get("ocr_confidence") != "low"):
+                nxt_data = nxt.get("table_data", [])
+                col_diff = abs(len(table_data[0] if table_data else [])
+                              - len(nxt_data[0] if nxt_data else [])) if table_data and nxt_data else 999
+                nxt_preview = (nxt.get("content") or "")[:60].strip()
+                similar = (col_diff <= 2) or (
+                    content_preview[:20] == nxt_preview[:20]
+                    if content_preview and nxt_preview else False
+                )
+                if similar and nxt_data:
+                    merged_data = list(table_data) + list(nxt_data)
+                    merged_elem = dict(elem)
+                    merged_elem["table_data"] = merged_data
+                    merged_elem["content"] = (elem.get("content") or "") + "\n" + (nxt.get("content") or "")
+                    merged_elem["continued_from"] = None
+                    merged_elem["continued_on_page"] = nxt.get("page_number")
+                    merged_elem["_segments"] = [
+                        {"page": page_num, "table_data": list(table_data)},
+                        {"page": nxt.get("page_number"), "table_data": list(nxt_data)}
+                    ]
+                    result.append(merged_elem)
+                    i += 2
+                    continue
+        result.append(elem)
+        i += 1
+    return result
+
+
 # ---------- Java 路径 ----------
 JAVA_BIN = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64/bin/java"
 JAVA_HOME = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64"
@@ -292,7 +347,8 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
    - 若表头某行存在单元格左下角(x1,y1)和右上角(x2,y2)，且y1>y2，则该单元格为斜线表头
    - 斜线表头的 cells 数组内相邻非空元素的水平投影应有一定间隔（≥表格宽度的1/4）
 8. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
-9. 识别所有中英文内容，数字、符号、化学式都要准确"""
+9. 识别所有中英文内容，数字、符号、化学式都要准确
+10. 对识别质量进行评分，填入 confidence 字段（high/medium/low），评判依据：文字清晰度、表格结构完整性、是否有遗漏或模糊区域"""
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
@@ -396,6 +452,9 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     with urllib.request.urlopen(req, timeout=180) as resp:
                         result_data = json.loads(resp.read())
                         content = result_data.get("message", {}).get("content", "")
+                        ocr_done_reason = result_data.get("done_reason", "")
+                        ocr_eval_count = result_data.get("eval_count", 0)
+                        ocr_total_duration = result_data.get("total_duration", 0)
                         break
                 except Exception as _e:
                     if attempt < 2:
@@ -413,6 +472,16 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
 
             if not content:
                 continue
+
+            # 计算该页 OCR 置信度
+            ocr_quality = "high"
+            if ocr_done_reason and ocr_done_reason != "stop":
+                ocr_quality = "medium"
+            if ocr_eval_count > 0:
+                avg_chars_per_token = len(content) / ocr_eval_count if ocr_eval_count else 0
+                if avg_chars_per_token < 3 or avg_chars_per_token > 50:
+                    ocr_quality = "low"
+            page_confidence = ocr_quality
 
             # 解析 JSON
             try:
@@ -438,14 +507,16 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     heading = block.get("heading", "") or ""
                     total_paras += 1
                     elem = {"type": "paragraph", "content": bcontent,
-                        "page_number": page_num, "paragraph_index": total_paras}
+                        "page_number": page_num, "paragraph_index": total_paras,
+                        "ocr_confidence": page_confidence}
                     if heading:
                         elem["heading"] = heading
                     all_elements.append(elem)
                 elif btype == "table":
                     total_tables += 1
                     elem = {"type": "table", "content": bcontent,
-                        "page_number": page_num, "table_index": total_tables}
+                        "page_number": page_num, "table_index": total_tables,
+                        "ocr_confidence": page_confidence}
                     raw_td = block.get("table_data", [])
                     table_data, has_span = _parse_table_data(raw_td)
                     elem["table_data"] = table_data
@@ -487,6 +558,10 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
             f.write('\n'.join(md_lines))
 
         print(f"[成功] qwen2.5vl OCR 完成: {len(all_elements)} 个元素")
+
+        # 跨页表格拼接
+        all_elements = _merge_consecutive_tables(all_elements)
+
         _result = {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
 
     finally:
