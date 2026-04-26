@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """opendataloader_auto.py v2.3.0 (2026-04-25)
 表格结构提取: qwen2.5vl OCR + cell_bbox(坐标), col_span/row_span, 嵌套表头检测, 斜线表头检测, has_merged_cells标记。
-文档自动检测与转换脚本（统一处理 PDF / Word / Excel）
+文档自动检测与转换脚本(统一处理 PDF / Word / Excel)
 版本: 2.0.0
 日期: 2026-04-24
 
-更新说明：
-  - 扫描 PDF 的处理优先级调整：qwen2.5vl（主）→ Hybrid/EasyOCR（备）→ Fast（保底）
-  - 移除 `--force-qwen` 标志，扫描 PDF 自动优先使用 qwen2.5vl
-  - `--force-qwen` 重新定义为：跳过 Hybrid，直接用 qwen + Fast（禁用 Hybrid 作为备选）
+更新说明:
+  - 扫描 PDF 的处理优先级调整:qwen2.5vl(主)→ Hybrid/EasyOCR(备)→ Fast(保底)
+  - 移除 `--force-qwen` 标志,扫描 PDF 自动优先使用 qwen2.5vl
+  - `--force-qwen` 重新定义为:跳过 Hybrid,直接用 qwen + Fast(禁用 Hybrid 作为备选)
 
-架构说明（v1.8）：
-  输入为 PDF  → 直接提取（位置信息 + 内容，PDF 限制：有 bbox/页码，表格数据可能稀疏）
+架构说明(v1.8):
+  输入为 PDF  → 直接提取(位置信息 + 内容,PDF 限制:有 bbox/页码,表格数据可能稀疏)
   输入为 Word → Word转PDF + docx直接提取 + PDF位置提取 → 智能合并
-               相同信息以更可靠来源为准：表格/文本内容以 docx 为准，位置信息（页码/bbox）以 PDF 为准
-  输入为 Excel → openpyxl直接提取（结构化数据/表格/图表）+ Excel转PDF获取页码 → 合并
+               相同信息以更可靠来源为准:表格/文本内容以 docx 为准,位置信息(页码/bbox)以 PDF 为准
+  输入为 Excel → openpyxl直接提取(结构化数据/表格/图表)+ Excel转PDF获取页码 → 合并
 
-输出：统一的两文件架构
-  ✦ {basename}.json    ← 结构化数据，含完整内容和位置信息
+输出:统一的两文件架构
+  ✦ {basename}.json    ← 结构化数据,含完整内容和位置信息
   ✦ {basename}.md      ← 人类可读的 Markdown
 """
 
@@ -29,9 +29,93 @@ import subprocess
 import time
 import re
 from pathlib import Path
+from docx.oxml.ns import qn as _qn
 
 
 # ---------- 辅助函数 ----------
+def _extract_excel_table_with_spans(ws) -> list:
+    """
+    从 openpyxl Worksheet 中提取带 colspan/row_span 的表格数据。
+    返回格式(与 Word / qwen2.5vl 输出一致):
+    [
+        {
+            "cells": ["列1", "列2", "列3"],
+            "col_span": [1, 1, 1],
+            "row_span": [1, 1, 1],
+        },
+        ...
+    ]
+
+    实现逻辑:
+    1. 遍历所有合并单元格范围,建立 {cell_coord: (span_cols, span_rows, is_merged_start)} 映射
+    2. 逐行逐列读取,若单元格属于合并范围但非起始格,记为 ''(空内容)
+    3. 合并范围的起始格,记录实际的 colspan/row_span
+    4. 横向合并:colspan > 1
+    5. 纵向合并:row_span > 1
+    """
+    from openpyxl.utils import range_boundaries
+
+    # 步骤1:建立合并单元格映射
+    # merged_ranges: list of (min_col, min_row, max_col, max_row)
+    merged_map = {}  # (row, col) -> {colspan, rowspan, is_start} or {skip: True}
+    for merged_range in ws.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+        span_cols = max_col - min_col + 1
+        span_rows = max_row - min_row + 1
+        # 标记起始单元格
+        merged_map[(min_row, min_col)] = {"colspan": span_cols, "rowspan": span_rows, "is_start": True}
+        # 标记被合并的后续单元格(跳过)
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                if (r, c) != (min_row, min_col):
+                    merged_map[(r, c)] = {"skip": True, "is_merged": True}
+
+    # 步骤2:逐行逐列输出,跳过被合并的单元格
+    result = []
+    for row in ws.iter_rows(values_only=False):
+        row_cells_out = []
+        col_spans = []
+        row_spans = []
+        col_ptr = 0
+        row_num = row[0].row  # 当前行号(1-indexed)
+
+        while col_ptr < len(row):
+            cell = row[col_ptr]
+            r, c = cell.row, cell.column  # 1-indexed
+            info = merged_map.get((r, c), {})
+
+            if info.get("skip"):
+                # 被合并的格子(横向/纵向都属于起始格覆盖范围),跳过
+                col_ptr += 1
+                continue
+
+            if info.get("is_start"):
+                cs = info["colspan"]
+                rs = info["rowspan"]
+            else:
+                cs = 1
+                rs = 1
+
+            val = cell.value
+            cell_text = _make_serializable(val) if val is not None else ""
+            row_cells_out.append(cell_text)
+            col_spans.append(cs)
+            row_spans.append(rs)
+            col_ptr += 1
+
+        # 整行被纵向合并覆盖(无任何内容输出),跳过
+        if not row_cells_out:
+            continue
+
+        result.append({
+            "cells": row_cells_out,
+            "col_span": col_spans,
+            "row_span": row_spans,
+        })
+
+    return result
+
+
 def _parse_markdown_table(md_text: str) -> list:
     """
     解析 Markdown 表格文本为 2D 数组。
@@ -53,10 +137,147 @@ def _parse_markdown_table(md_text: str) -> list:
     return rows
 
 
+def _extract_docx_table_with_spans(table) -> list:
+    """
+    从 python-docx Table 中提取带 colspan/row_span 的表格数据。
+    返回格式(与 qwen2.5vl OCR 输出一致):
+    [
+        {
+            "cells": ["A", "B", "C"],
+            "col_span": [1, 2, 1],   # 每列的 colspan
+            "row_span": [1, 1, 1],   # 每列的 row_span(垂直合并)
+        },
+        ...
+    ]
+    检测:
+    - colspan: gridSpan 元素(Word 单元格横向合并)
+    - rowspan: vMerge 元素(Word 单元格纵向合并)
+    """
+    from docx.oxml.ns import qn
+
+    result = []
+    for row in table.rows:
+        cells = row.cells
+        col_spans = []
+        row_spans = []
+        cell_texts = []
+
+        for cell in cells:
+            tc = cell._tc
+            # colspan: gridSpan
+            gridSpan_el = tc.find(_qn('w:gridSpan'))
+            cs = int(gridSpan_el.get(_qn('w:val'))) if gridSpan_el is not None else 1
+            col_spans.append(cs)
+
+            # rowspan: vMerge(continue=续行,None/restart=起始行)
+            vMerge_el = tc.find(_qn('w:vMerge'))
+            if vMerge_el is not None:
+                val = vMerge_el.get(_qn('w:val'))
+                rs = -1 if val == 'continue' else 1  # -1 表示属于上面的纵向合并
+            else:
+                rs = 1
+            row_spans.append(rs)
+
+            cell_texts.append(cell.text.strip())
+
+        result.append({
+            "cells": cell_texts,
+            "col_span": col_spans,
+            "row_span": row_spans,
+        })
+
+    return result
+
+
+def _detect_merged_cells_from_flat(table_data: list) -> tuple:
+    """
+    从 opendataloader 输出的扁平 table_data 推算是否存在合并单元格。
+    table_data: 扁平 2D 数组 [[cell, ...], ...]
+    返回: (flat_array, has_merged_cells: bool)
+
+    推算逻辑:
+    - 如果某行 cell 数 < 最大列数 → 存在横向合并(colspan)
+    - 如果相邻两行某列内容完全相同且其间无空行 → 可能纵向合并(row_span)
+    缺点:无法精确还原 colspan/row_span 值,只能标记"疑似合并"
+    """
+    if not table_data or not isinstance(table_data, list):
+        return table_data, False
+
+    # 估算总列数(最多 cell 的那一行)
+    max_cols = max(len(row) for row in table_data if isinstance(row, list))
+    if max_cols == 0:
+        return table_data, False
+
+    has_merged = False
+    for row in table_data:
+        if not isinstance(row, list):
+            continue
+        cell_count = len([c for c in row if c is not None and str(c).strip() != ""])
+        if len(row) < max_cols:
+            has_merged = True
+            break
+
+    return table_data, has_merged
+
+
+def _table_to_markdown_with_spans(table_rows: list, output_format: str = "docx") -> str:
+    """
+    将带 colspan/row_span 的表格数据渲染为 Markdown。
+    output_format="docx": 使用 docx 的 gridSpan 渲染
+    output_format="inferred": 使用推算的合并信息渲染
+    横向合并的单元格:在对应位置填满空列
+    纵向合并的单元格:在续行位置填入 "^"(Markdown table rowspan 扩展惯例)
+    """
+    if not table_rows:
+        return ""
+
+    # 推算总列数
+    def total_cols(row_entry):
+        if isinstance(row_entry, dict):
+            return sum(row_entry.get("col_span", [1] * len(row_entry["cells"])))
+        return len(row_entry)
+
+    # 扁平渲染一行
+    def render_flat_row(row_entry):
+        if isinstance(row_entry, dict):
+            cells = row_entry["cells"]
+            col_spans = row_entry.get("col_span", [1] * len(cells))
+            row_spans = row_entry.get("row_span", [1] * len(cells))
+            rendered = []
+            for i, cell in enumerate(cells):
+                cs = col_spans[i] if i < len(col_spans) else 1
+                rendered.append(cell if cell else "")
+                for _ in range(cs - 1):
+                    rendered.append("")  # 横向合并的空列位
+            return rendered
+        return list(row_entry)
+
+    max_cols = max(total_cols(r) for r in table_rows) if table_rows else 0
+    if max_cols == 0:
+        return ""
+
+    lines = []
+    # 表头行
+    header = render_flat_row(table_rows[0])
+    while len(header) < max_cols:
+        header.append("")
+    lines.append("| " + " | ".join(str(c) for c in header[:max_cols]) + " |")
+    # 分隔行
+    lines.append("| " + " | ".join(["---"] * max_cols) + " |")
+    # 数据行
+    for row_entry in table_rows[1:]:
+        flat = render_flat_row(row_entry)
+        while len(flat) < max_cols:
+            flat.append("")
+        lines.append("| " + " | ".join(str(c) for c in flat[:max_cols]) + " |")
+
+    return "\n".join(lines)
+
+
 def _parse_table_data(raw_data):
     """
-    统一解析 table_data 字段，支持两种格式：
-    - 简单格式: [["列1","列2"], ["值1","值2"]]       → 直接返回，has_span=False
+    统一解析 table_data 字段,支持两种格式:
+    - 简单格式: [["列1","列2"], ["值1","值2"]]       → 直接返回,has_span=False
     - 增强格式: [{"cells":[...],"col_span":[...],"row_span":[...]}] → 展开为 2D 数组
 
     返回: (flat_2d_array, has_merged_cells: bool)
@@ -212,13 +433,191 @@ def _analyze_table_structure(raw_td):
 
 
 
+def _render_pdf_pages_as_images(pdf_path: str, page_numbers: list,
+                                  output_dir: str) -> dict:
+    """
+    将 PDF 指定页渲染为图像文件(用于 qwen2.5vl OCR 输入)。
+    使用 pypdfium2 逐页渲染,返回 {page_num: image_path} 映射。
+    """
+    import pypdfium2 as pdfium
+    page_images = {}
+    os.makedirs(output_dir, exist_ok=True)
+    try:
+        pdf_doc = pdfium.PdfDocument(pdf_path)
+        for pg in page_numbers:
+            if pg < 1 or pg > len(pdf_doc):
+                continue
+            page = pdf_doc[pg - 1]  # 0-indexed
+            bitmap = page.render(
+                scale=2.0,  # 2x scale for better OCR quality
+                stream=pdfium.PdfRenderActivity.RETURN
+            )
+            pil_img = bitmap.to_pil()
+            img_path = os.path.join(output_dir, f"page_{pg:04d}.png")
+            pil_img.save(img_path, format="PNG")
+            page_images[pg] = img_path
+    except Exception as e:
+        print(f"[警告] 页面渲染失败: {e}", file=sys.stderr)
+    return page_images
+
+
+def _ocr_images_with_qwen(image_paths: list, lang: str = "auto") -> list:
+    """
+    将图像列表交给 qwen2.5vl OCR,返回元素列表(与 qwen_ocr_pdf 结构一致)。
+    image_paths: [{page_num: image_path}, ...] 或简单列表
+    """
+    import urllib.request
+    import base64
+    import io
+    from PIL import Image
+
+    lang_prompt = "中文" if lang == "zh" else "英文"
+    all_elements = []
+
+    for img_path in image_paths:
+        if not os.path.exists(img_path):
+            continue
+        try:
+            with open(img_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+            with Image.open(img_path) as pil_img:
+                width, height = pil_img.size
+
+            prompt = QWEN_OCR_PROMPT
+
+            payload = {
+                "model": QWEN_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }],
+                "stream": False
+            }
+
+            req = urllib.request.Request(
+                OLLAMA_URL + "/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+
+            content = result.get("message", {}).get("content", "")
+            # 去掉 markdown code block
+            content = re.sub(r"^```(?:json)?\s*", "", content.strip())
+            content = re.sub(r"\s*```$", "", content.strip())
+            data = json.loads(content)
+
+            for block in data.get("blocks", []):
+                btype = block.get("type", "")
+                bcontent = (block.get("content") or "").strip()
+                if not bcontent:
+                    continue
+                if btype == "text":
+                    all_elements.append({
+                        "type": "paragraph",
+                        "content": bcontent,
+                        "heading": block.get("heading", ""),
+                    })
+                elif btype == "table":
+                    raw_td = block.get("table_data", [])
+                    table_data, has_span = _parse_table_data(raw_td)
+                    has_merged = any(
+                        any(cs > 1 or rs > 1 for cs, rs in zip(
+                            r.get("col_span", [1]*len(r.get("cells",[]))),
+                            r.get("row_span", [1]*len(r.get("cells",[])))))
+                        for r in raw_td
+                    ) if raw_td else False
+                    all_elements.append({
+                        "type": "table",
+                        "content": bcontent,
+                        "table_data": table_data,
+                        "has_merged_cells": has_span or has_merged,
+                        "_raw_td": raw_td,
+                    })
+        except Exception as e:
+            print(f"[警告] qwen2.5vl OCR 失败 {img_path}: {e}", file=sys.stderr)
+    return all_elements
+
+
+def _process_pages_with_qwen(pdf_path: str, output_dir: str,
+                               table_pages: list, lang: str) -> list:
+    """
+    仅对指定页码列表渲染图像并执行 qwen2.5vl OCR。
+    返回该批页的 kids 元素列表(与 qwen_ocr_pdf 结构一致)。
+    """
+    _got_vram = False
+    _vm = None
+    try:
+        sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
+        from vram_manager import VMgr
+        _vm = VMgr()
+        import time as _time
+        _waited = 0
+        while _waited < 300:
+            _status = _vm.status()
+            _vram_free = _status.get("vram_free_mb", 0)
+            _state = _status.get("state", "?")
+            if _vram_free >= 18000:
+                if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                    _got_vram = True
+                    break
+            if _waited == 0:
+                print(f"[      ] VRAM 排队等待(free={_vram_free}MB)...")
+            _time.sleep(10)
+            _waited += 10
+    except Exception as _e:
+        print(f"[警告] VRAM 队列异常: {_e}", file=sys.stderr)
+
+    try:
+        # 渲染指定页为图像
+        render_dir = os.path.join(output_dir, "_table_pages_render")
+        page_images = _render_pdf_pages_as_images(pdf_path, table_pages, render_dir)
+        if not page_images:
+            print(f"[警告] 页面渲染失败,返回空", file=sys.stderr)
+            return []
+
+        # 调用 qwen2.5vl OCR
+        img_list = [img_path for pg, img_path in sorted(page_images.items())]
+        ocr_elements = _ocr_images_with_qwen(img_list, lang=lang)
+
+        # 建立页码映射(image_paths 顺序与 table_pages 顺序对应)
+        pg_elements = {}
+        for i, img_path in enumerate(img_list):
+            pg_num = sorted(page_images.keys())[i]
+            for elem in ocr_elements:
+                e = dict(elem)
+                e["page_number"] = pg_num
+                if pg_num not in pg_elements:
+                    pg_elements[pg_num] = []
+                pg_elements[pg_num].append(e)
+
+        # 收集所有 kids
+        all_kids = []
+        for pg in sorted(pg_elements.keys()):
+            for elem in pg_elements[pg]:
+                all_kids.append(elem)
+        print(f"[      ] qwen2.5vl OCR 完成:{len(table_pages)} 页 → {len(all_kids)} 元素")
+        return all_kids
+    finally:
+        if _vm is not None:
+            try:
+                _vm.release_and_restore()
+            except Exception:
+                pass
+
+
 def _merge_consecutive_tables(elements: list) -> list:
     """
     检测并合并跨页表格。
-    规则：
-      - 连续两页出现相似结构的表格（列数相近或表头前缀相同）→ 合并
+    规则:
+      - 连续两页出现相似结构的表格(列数相近或表头前缀相同)→ 合并
       - 合并后表格保留 continued_from / continued_on_page 标记
-      - _segments 记录每段来源页码，方便回溯
+      - _segments 记录每段来源页码,方便回溯
     """
     if not elements:
         return elements
@@ -272,15 +671,15 @@ JAVA_HOME = "/home/wangyc/opt/jre/amazon-corretto-11.0.30.7.1-linux-x64"
 HYBRID_SERVER_PID_FILE = "/tmp/opendataloader_hybrid_server.pid"
 HYBRID_SERVER_PORT = 5002
 
-# ---------- qwen2.5vl OCR 配置（Hybrid 失败时的备用） ----------
+# ---------- qwen2.5vl OCR 配置(Hybrid 失败时的备用) ----------
 QWEN_MODEL = "qwen2.5vl:latest"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
 def check_qwen_available() -> bool:
-    """检查本地 qwen2.5vl 是否可用（默认关闭，防止 OOM）"""
-    # qwen2.5vl OCR 内存消耗大，容易 OOM 导致进程被 kill。
-    # 默认返回 False，优先使用 EasyOCR。如需启用 qwen，设置环境变量 ENABLE_QWEN=1。
+    """检查本地 qwen2.5vl 是否可用(默认关闭,防止 OOM)"""
+    # qwen2.5vl OCR 内存消耗大,容易 OOM 导致进程被 kill。
+    # 默认返回 False,优先使用 EasyOCR。如需启用 qwen,设置环境变量 ENABLE_QWEN=1。
     if os.environ.get("ENABLE_QWEN", "0") != "1":
         return False
     import urllib.request
@@ -293,22 +692,22 @@ def check_qwen_available() -> bool:
             data = json.loads(resp.read())
             models = [m["name"] for m in data.get("models", [])]
             if any("qwen" in m.lower() and "vl" in m.lower() for m in models):
-                print(f"[INFO] qwen2.5vl 已启用（ENABLE_QWEN=1）", file=sys.stderr)
+                print(f"[INFO] qwen2.5vl 已启用(ENABLE_QWEN=1)", file=sys.stderr)
                 return True
     except Exception:
         pass
     return False
 
 
-QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识别这张 PDF 页面的内容，并按以下 JSON 格式返回：
+QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识别这张 PDF 页面的内容,并按以下 JSON 格式返回:
 ```json
 {
   "page": <页码>,
   "blocks": [
-    {"type": "text", "content": "<识别的文本段落>", "heading": "<如果是标题则填入标题文本，否则空字符串>"},
+    {"type": "text", "content": "<识别的文本段落>", "heading": "<如果是标题则填入标题文本,否则空字符串>"},
     {
       "type": "table",
-      "content": "<表格的纯文本表示，每行用换行分隔>",
+      "content": "<表格的纯文本表示,每行用换行分隔>",
       "table_data": [
         {
           "cells": ["列1", "列2", "列3"],
@@ -327,28 +726,28 @@ QWEN_OCR_PROMPT = """你是一个专业的文档 OCR 提取助手。请仔细识
   ]
 }
 ```
-重要规则：
-1. 只输出 JSON，不要任何解释
-2. table 块必须同时提供 content（纯文本）和 table_data（对象数组），缺一不可
-3. table_data 每个单元格必须是字符串，空单元格用 "" 表示
-4. cell_bbox（强烈建议提供）：每个单元格的边界框坐标数组，单位为点数（pt），格式为 [left, bottom, right, top]，坐标原点为页面左下角。
-   - 若某行未提供 cell_bbox，则用前一行的 bbox 按行号递推估算（行间距默认20pt）
-   - 若 cell_bbox 列数与 cells 列数不一致，以 cells 为准，bbox 多余部分忽略，少则按列均分
-5. col_span / row_span 均为整数数组，长度与 cells 相同：
-   - col_span[i]=N 表示该单元格从当前列起占据 N 列（跨列）
-   - row_span[i]=N 表示该单元格从当前行起占据 N 行（跨行）
+重要规则:
+1. 只输出 JSON,不要任何解释
+2. table 块必须同时提供 content(纯文本)和 table_data(对象数组),缺一不可
+3. table_data 每个单元格必须是字符串,空单元格用 "" 表示
+4. cell_bbox(强烈建议提供):每个单元格的边界框坐标数组,单位为点数(pt),格式为 [left, bottom, right, top],坐标原点为页面左下角。
+   - 若某行未提供 cell_bbox,则用前一行的 bbox 按行号递推估算(行间距默认20pt)
+   - 若 cell_bbox 列数与 cells 列数不一致,以 cells 为准,bbox 多余部分忽略,少则按列均分
+5. col_span / row_span 均为整数数组,长度与 cells 相同:
+   - col_span[i]=N 表示该单元格从当前列起占据 N 列(跨列)
+   - row_span[i]=N 表示该单元格从当前行起占据 N 行(跨行)
    - 跨行/跨列的单元格在其所跨越的后续位置不再重复出现
-   - 解析规则：按行展开；若 col_span=[1,2,1]，第1列正常，第2列跨2列（填入内容，后续位置跳过），第3列正常
-6. 嵌套表头检测规则：
-   - 若某行所有列的 row_span > 1，表示该行是上级表头行，其下各行属于该表头的子列
-   - 若一行的多个连续列 col_span > 1 且内容简洁（≤4字符），这些列可能是下级表头
-   - 典型嵌套结构：第1行["项目","  ","统计分析"] + 第2行["  ","A组","B组"]
-7. 斜线表头检测规则：
-   - 若表头某行存在单元格左下角(x1,y1)和右上角(x2,y2)，且y1>y2，则该单元格为斜线表头
-   - 斜线表头的 cells 数组内相邻非空元素的水平投影应有一定间隔（≥表格宽度的1/4）
-8. 文本块如果包含标题（如"一、概述"），heading 字段填入标题文本
-9. 识别所有中英文内容，数字、符号、化学式都要准确
-10. 对识别质量进行评分，填入 confidence 字段（high/medium/low），评判依据：文字清晰度、表格结构完整性、是否有遗漏或模糊区域"""
+   - 解析规则:按行展开;若 col_span=[1,2,1],第1列正常,第2列跨2列(填入内容,后续位置跳过),第3列正常
+6. 嵌套表头检测规则:
+   - 若某行所有列的 row_span > 1,表示该行是上级表头行,其下各行属于该表头的子列
+   - 若一行的多个连续列 col_span > 1 且内容简洁(≤4字符),这些列可能是下级表头
+   - 典型嵌套结构:第1行["项目","  ","统计分析"] + 第2行["  ","A组","B组"]
+7. 斜线表头检测规则:
+   - 若表头某行存在单元格左下角(x1,y1)和右上角(x2,y2),且y1>y2,则该单元格为斜线表头
+   - 斜线表头的 cells 数组内相邻非空元素的水平投影应有一定间隔(≥表格宽度的1/4)
+8. 文本块如果包含标题(如"一、概述"),heading 字段填入标题文本
+9. 识别所有中英文内容,数字、符号、化学式都要准确
+10. 对识别质量进行评分,填入 confidence 字段(high/medium/low),评判依据:文字清晰度、表格结构完整性、是否有遗漏或模糊区域"""
 
 
 def qwen_ocr_pdf(pdf_path: str, output_dir: str,
@@ -356,9 +755,9 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                 pages_to_skip: list = None) -> dict:
     """
     使用本地 qwen2.5vl 对扫描 PDF 进行 OCR
-    逐页处理，每页独立获取VRAM → OCR → 立即释放VRAM
+    逐页处理,每页独立获取VRAM → OCR → 立即释放VRAM
 
-    pages_to_skip: 数字页列表（只跳过，不 OCR），节省时间
+    pages_to_skip: 数字页列表(只跳过,不 OCR),节省时间
     """
     import urllib.request
     import base64
@@ -367,26 +766,26 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
     _vm = None
     _result = {"success": False}
 
-    # ---- VRAM 初始化（获取调度器引用，暂不占用）----
+    # ---- VRAM 初始化(获取调度器引用,暂不占用)----
     try:
         sys.path.insert(0, "/home/wangyc/.openclaw/scripts")
         from vram_manager import VMgr
         _vm = VMgr()
     except Exception as e:
-        print(f"[警告] VRAM 调度器初始化失败: {e}，将直接执行 OCR...", file=sys.stderr)
+        print(f"[警告] VRAM 调度器初始化失败: {e},将直接执行 OCR...", file=sys.stderr)
 
-    # ---- 正式 OCR 处理（外层 try 确保 VRAM 始终被恢复）----
+    # ---- 正式 OCR 处理(外层 try 确保 VRAM 始终被恢复)----
     try:
         try:
             import pypdfium2 as pdfium
         except ImportError:
-            print("[错误] pypdfium2 未安装，qwen2.5vl OCR 无法使用", file=sys.stderr)
+            print("[错误] pypdfium2 未安装,qwen2.5vl OCR 无法使用", file=sys.stderr)
             return _result
 
         try:
             doc = pdfium.PdfDocument(pdf_path)
             total_pages = len(doc)
-            print(f"[INFO] PDF 共 {total_pages} 页，开始逐页 OCR（每页独立VRAM）...")
+            print(f"[INFO] PDF 共 {total_pages} 页,开始逐页 OCR(每页独立VRAM)...")
         except Exception as e:
             print(f"[错误] 无法读取 PDF: {e}", file=sys.stderr)
             return _result
@@ -404,17 +803,17 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
         for page_idx in range(total_pages):
             page_num = page_idx + 1
             if page_num in skip_set:
-                continue  # 跳过数字页，只 OCR 扫描页
+                continue  # 跳过数字页,只 OCR 扫描页
 
-            # === VRAM 每页获取（渲染前让出，给ComfyUI机会）===
+            # === VRAM 每页获取(渲染前让出,给ComfyUI机会)===
             _page_vram_acquired = False
             if _vm is not None:
                 try:
                     if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
                         _page_vram_acquired = True
-                        print(f"[INFO] VRAM 已腾出（第{page_num}页），qwen2.5vl 可用")
+                        print(f"[INFO] VRAM 已腾出(第{page_num}页),qwen2.5vl 可用")
                 except Exception as _e:
-                    print(f"[警告] VRAM 获取异常: {_e}，继续尝试...", file=sys.stderr)
+                    print(f"[警告] VRAM 获取异常: {_e},继续尝试...", file=sys.stderr)
 
             try:
                 page = doc.get_page(page_idx)
@@ -432,7 +831,7 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                         pass
                 continue
 
-            # 调用 Ollama（重试3次）
+            # 调用 Ollama(重试3次)
             content = None
             for attempt in range(3):
                 try:
@@ -463,7 +862,7 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
                     else:
                         print(f"[警告] 第 {page_num} 页 OCR 失败: {_e}", file=sys.stderr)
 
-            # === VRAM 每页立即释放（趁qwen2.5vl还在显存中）===
+            # === VRAM 每页立即释放(趁qwen2.5vl还在显存中)===
             if _page_vram_acquired and _vm is not None:
                 try:
                     _vm.release_and_restore()
@@ -565,7 +964,7 @@ def qwen_ocr_pdf(pdf_path: str, output_dir: str,
         _result = {"success": True, "json_path": str(json_path), "md_path": str(md_path)}
 
     finally:
-        # VRAM 最终恢复（清理残余状态）
+        # VRAM 最终恢复(清理残余状态)
         if _vm is not None:
             try:
                 _vm.release_and_restore()
@@ -601,17 +1000,17 @@ def convert_word_to_pdf(docx_path: str, output_dir: str = "/tmp") -> str:
     if result.returncode != 0:
         raise RuntimeError(f"LibreOffice 转换失败: {result.stderr[:300]}")
 
-    # LibreOffice 可能改名（如加编号），找最新生成的 pdf
+    # LibreOffice 可能改名(如加编号),找最新生成的 pdf
     # 等待文件落盘
     time.sleep(1)
 
-    # 精确路径：与 docx 同名的 pdf
+    # 精确路径:与 docx 同名的 pdf
     expected = os.path.join(pdf_dir, basename)
     if os.path.exists(expected):
         print(f"[INFO] PDF 生成成功: {expected}")
         return expected
 
-    # 备选：找最新的 pdf 文件
+    # 备选:找最新的 pdf 文件
     files = sorted(Path(pdf_dir).glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
     if files:
         print(f"[INFO] PDF 生成成功: {files[0]}")
@@ -620,17 +1019,17 @@ def convert_word_to_pdf(docx_path: str, output_dir: str = "/tmp") -> str:
     raise RuntimeError("PDF 转换后未找到输出文件")
 
 
-# ---------- PDF 提取结果增强（内容指纹） ----------
+# ---------- PDF 提取结果增强(内容指纹) ----------
 def add_content_fingerprint(data: dict) -> dict:
     """
-    给 PDF 提取的 JSON 添加内容指纹，增强可追溯性。
+    给 PDF 提取的 JSON 添加内容指纹,增强可追溯性。
     1. 扁平化 kids 嵌套结构 → flat_elements
-    2. 添加 section_path（标题层级路径）
-    3. 添加 table_index / paragraph_index（全局序号）
-    4. 添加 content_preview（前100字符，用于快速定位）
+    2. 添加 section_path(标题层级路径)
+    3. 添加 table_index / paragraph_index(全局序号)
+    4. 添加 content_preview(前100字符,用于快速定位)
     """
     flat = []
-    heading_path = []  # 栈：当前标题路径
+    heading_path = []  # 栈:当前标题路径
 
     def flatten(kids, flat_list, heading_path):
         for kid in kids:
@@ -641,14 +1040,14 @@ def add_content_fingerprint(data: dict) -> dict:
             if kid_type in ("heading", "header"):
                 level = elem.get("heading level", 99)
                 # Doctitle=0, Subtitle=1, 正文=2...
-                # 简单映射：heading level 数值
+                # 简单映射:heading level 数值
                 # 弹出更高级的标题
                 while heading_path and heading_path[-1][0] >= level:
                     heading_path.pop()
                 heading_path.append((level, elem.get("content", "")))
                 elem["section_path"] = " > ".join(h for _, h in heading_path)
                 flat_list.append(elem)
-                # 递归处理 kids（子元素）
+                # 递归处理 kids(子元素)
                 if "kids" in elem:
                     flatten(elem.pop("kids"), flat_list, heading_path)
             else:
@@ -668,7 +1067,7 @@ def add_content_fingerprint(data: dict) -> dict:
         t = elem.get("type", "")
         content = elem.get("content", "")
 
-        # 内容预览（前100字）
+        # 内容预览(前100字)
         elem["content_preview"] = content[:100] + ("..." if len(content) > 100 else "")
 
         if t == "table":
@@ -693,26 +1092,26 @@ def add_content_fingerprint(data: dict) -> dict:
     return data
 
 
-# ---------- 核心：合并 Word 内容 + PDF 位置信息 ----------
+# ---------- 核心:合并 Word 内容 + PDF 位置信息 ----------
 def normalize_text(text: str) -> str:
-    """文本归一化：去空格、标点、换行，用于匹配"""
+    """文本归一化:去空格、标点、换行,用于匹配"""
     if not text:
         return ""
     import unicodedata
     text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"[\s\n\r\t\xa0·\-–—–‑]", "", text)
+    text = re.sub(r"[\s\n\r\t\xa0·\-----]", "", text)
     text = text.lower()
     return text
 
 
 def text_similarity(t1: str, t2: str) -> float:
-    """两个文本的相似度（0~1）"""
+    """两个文本的相似度(0~1)"""
     n1, n2 = normalize_text(t1), normalize_text(t2)
     if not n1 or not n2:
         return 0.0
     if n1 == n2:
         return 1.0
-    # 简单：n1 在 n2 中或 n2 在 n1 中 → 高相似
+    # 简单:n1 在 n2 中或 n2 在 n1 中 → 高相似
     if n1 in n2 or n2 in n1:
         return 0.8
     # Jaccard
@@ -724,10 +1123,10 @@ def text_similarity(t1: str, t2: str) -> float:
 
 def extract_pdf_positions(pdf_flat: list) -> dict:
     """
-    从 PDF 扁平元素列表中提取：
-    - 标题层级路径（heading → section_path）
-    - 页码 + bbox（heading / table / paragraph / image）
-    返回结构：{(type, normalized_key): {page, bbox, section_path}}
+    从 PDF 扁平元素列表中提取:
+    - 标题层级路径(heading → section_path)
+    - 页码 + bbox(heading / table / paragraph / image)
+    返回结构:{(type, normalized_key): {page, bbox, section_path}}
     """
     pos_map = {}
     heading_path = []
@@ -762,11 +1161,11 @@ def find_best_pdf_match(docx_elem: dict, pdf_pos_map: dict,
                         seen_tables: set, seen_paras: set) -> dict:
     """
     为单个 docx 元素在 pdf_flat 中找最佳匹配的 position 信息。
-    匹配策略：
-      - 标题：按 text 精确匹配（normalize 后）
-      - 表格：按内容相似度匹配（取第一行文字）
-      - 段落：按内容相似度匹配（跳过已匹配的）
-    返回：{page, bbox, section_path} 或 {}
+    匹配策略:
+      - 标题:按 text 精确匹配(normalize 后)
+      - 表格:按内容相似度匹配(取第一行文字)
+      - 段落:按内容相似度匹配(跳过已匹配的)
+    返回:{page, bbox, section_path} 或 {}
     """
     t = docx_elem.get("type", "")
     content = docx_elem.get("content", "")
@@ -816,8 +1215,8 @@ def find_best_pdf_match(docx_elem: dict, pdf_pos_map: dict,
 
 def merge_docx_and_pdf(docx_data: dict, pdf_flat: list) -> dict:
     """
-    核心合并函数：以 docx 内容为主体，为每个元素附加 PDF 位置信息。
-    相同信息以更可靠来源为准：表格/文本内容以 docx 为准，页码/bbox 以 PDF 为准。
+    核心合并函数:以 docx 内容为主体,为每个元素附加 PDF 位置信息。
+    相同信息以更可靠来源为准:表格/文本内容以 docx 为准,页码/bbox 以 PDF 为准。
     """
     # 构建 PDF position 字典
     pdf_pos_map = extract_pdf_positions(pdf_flat)
@@ -829,7 +1228,7 @@ def merge_docx_and_pdf(docx_data: dict, pdf_flat: list) -> dict:
     para_count = 0
     img_count = 0
 
-    # 收集 section_path（从 docx 的标题层级）
+    # 收集 section_path(从 docx 的标题层级)
     heading_path = []
 
     merged_elements = []
@@ -851,7 +1250,7 @@ def merge_docx_and_pdf(docx_data: dict, pdf_flat: list) -> dict:
         if len(elem.get("content", "")) > 100:
             elem["content_preview"] += "..."
 
-        # 在 PDF 中找位置（最佳匹配）
+        # 在 PDF 中找位置(最佳匹配)
         pos = find_best_pdf_match(elem, pdf_pos_map, seen_tables, seen_paras)
         if pos:
             elem["page"] = pos.get("page")
@@ -875,7 +1274,7 @@ def merge_docx_and_pdf(docx_data: dict, pdf_flat: list) -> dict:
         "total_tables": table_count,
         "total_paragraphs": para_count,
         "elements": merged_elements,
-        # PDF 位置信息（备用）
+        # PDF 位置信息(备用)
         "_pdf_position_hints": {
             "total_from_pdf": len(pdf_flat),
             "tables_matched": len(seen_tables),
@@ -886,7 +1285,7 @@ def merge_docx_and_pdf(docx_data: dict, pdf_flat: list) -> dict:
 
 
 def convert_word_to_markdown(docx_path: str) -> str:
-    """生成可读 Markdown（基于 docx，与合并后 JSON 对应）"""
+    """生成可读 Markdown(基于 docx,与合并后 JSON 对应)"""
     from docx import Document
     doc = Document(docx_path)
     lines = []
@@ -942,12 +1341,12 @@ def _make_serializable(val):
 
 def extract_excel_to_json(xlsx_path: str) -> dict:
     """
-    用 openpyxl 提取 Excel 完整内容：
+    用 openpyxl 提取 Excel 完整内容:
     - 工作表列表 + 表头
-    - 每个 sheet 的数据区域（转为 table 结构）
+    - 每个 sheet 的数据区域(转为 table 结构)
     - 命名区域 / 表格对象
-    - chart 图表（提取图表类型 + 关联数据表）
-    输出格式与 PDF/Word 统一（elements 数组）。
+    - chart 图表(提取图表类型 + 关联数据表)
+    输出格式与 PDF/Word 统一(elements 数组)。
     """
     import openpyxl
     from openpyxl.utils import get_column_letter
@@ -967,50 +1366,51 @@ def extract_excel_to_json(xlsx_path: str) -> dict:
         if ws.max_row < 2 or ws.max_column < 2:
             continue
 
-        # 判断 sheet 是否为表格（是否有数据的起始行）
-        # 收集该 sheet 的所有非空单元格数据
-        data_rows = []
-        for row in ws.iter_rows(values_only=True):
-            if any(cell is not None for cell in row):
-                data_rows.append(list(row))
+        # 判断 sheet 是否为表格(是否有数据的起始行)
+        # 使用 span-aware 提取(支持 colspan/rowspan 合并单元格)
+        rows_data = _extract_excel_table_with_spans(ws)
 
-        if not data_rows:
+        if not rows_data:
             continue
 
-        # 检测表头（第一行是否可作为列名）
-        headers = [_make_serializable(c) for c in data_rows[0]]
+        # 检测表头(第一行)
+        headers = rows_data[0]["cells"] if rows_data else []
 
-        # 构建 Markdown 表格
-        md_rows = []
-        md_rows.append("| " + " | ".join(str(h) for h in headers) + " |")
-        md_rows.append("| " + " | ".join(["---"] * len(headers)) + " |")
-        for row in data_rows[1:]:
-            row_vals = [_make_serializable(c) for c in row]
-            row_str = " | ".join(str(v) for v in row_vals)
-            md_rows.append("| " + row_str + " |")
+        # 检测是否有合并单元格
+        has_merged = any(
+            any(cs > 1 or rs > 1
+                for cs, rs in zip(r.get("col_span", []), r.get("row_span", [])))
+            for r in rows_data
+        )
+        has_nested_headers = False
+        if len(rows_data) >= 2:
+            first_col_spans = rows_data[0].get("col_span", [])
+            if any(cs > 1 for cs in first_col_spans):
+                has_nested_headers = True
 
-        table_content = "\n".join(md_rows)
+        # 构建 Markdown 表格(colspan 横向展开)
+        table_content = _table_to_markdown_with_spans(rows_data)
 
-        # 可序列化的 data_rows
-        serializable_rows = [
-            [_make_serializable(c) for c in row] for row in data_rows
-        ]
+        # 保留纯数据行(供 AI 直接分析用)
+        serializable_rows = [r["cells"] for r in rows_data]
 
         elements.append({
             "type": "table",
             "location": {
-                "excel": sheet_name,           # 主要标识：原Excel Sheet名
-                "pdf_page": None,               # PDF页码（匹配到则填入，否则None）
+                "excel": sheet_name,           # 主要标识:原Excel Sheet名
+                "pdf_page": None,               # PDF页码(匹配到则填入,否则None)
             },
             "table_index": table_count + 1,
             "content": table_content,
             "content_preview": table_content[:100],
-            "row_count": len(data_rows),
-            "col_count": len(headers),
+            "row_count": len(rows_data),
+            "col_count": max(len(r["cells"]) for r in rows_data) if rows_data else 0,
             "headers": headers,
-            "data_rows": serializable_rows,     # 结构化数组，AI 可直接分析
-            # 统一 table_data 格式（与其他来源一致，方便下游处理）
-            "table_data": [headers] + serializable_rows if headers or serializable_rows else [],
+            "data_rows": serializable_rows,     # 结构化数组,AI 可直接分析
+            # 统一 table_data 格式(含 colspan/row_span,与 Word/qwen2.5vl 一致)
+            "table_data": rows_data,
+            "has_merged_cells": has_merged,
+            "has_nested_headers": has_nested_headers,
             "section_path": f"Excel > {Path(xlsx_path).stem} > {sheet_name}",
         })
         table_count += 1
@@ -1029,7 +1429,7 @@ def extract_excel_to_json(xlsx_path: str) -> dict:
                     if refs:
                         data_desc = f"数据范围: {refs}"
 
-                # 构建图表的摘要数据（将图表还原为简化的数据表）
+                # 构建图表的摘要数据(将图表还原为简化的数据表)
                 sample_data = []
                 if hasattr(chart, "series") and chart.series:
                     for series in chart.series:
@@ -1039,8 +1439,8 @@ def extract_excel_to_json(xlsx_path: str) -> dict:
                 elements.append({
                     "type": "chart",
                     "location": {
-                        "excel": sheet_name,           # 主要标识：原Excel Sheet名
-                        "pdf_page": None,               # PDF页码（匹配到则填入，否则None）
+                        "excel": sheet_name,           # 主要标识:原Excel Sheet名
+                        "pdf_page": None,               # PDF页码(匹配到则填入,否则None)
                     },
                     "chart_index": chart_count,
                     "chart_type": chart_type,
@@ -1073,7 +1473,7 @@ def extract_excel_to_json(xlsx_path: str) -> dict:
 
 
 def extract_excel_to_markdown(xlsx_path: str, page_hints: dict = None) -> str:
-    """生成 Excel 的可读 Markdown（每个 sheet 转为 Markdown 表格）"""
+    """生成 Excel 的可读 Markdown(每个 sheet 转为 Markdown 表格)"""
     import openpyxl
 
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
@@ -1086,29 +1486,19 @@ def extract_excel_to_markdown(xlsx_path: str, page_hints: dict = None) -> str:
         pg_note = f" _(PDF 第{page_hint}页)_" if page_hint else ""
         lines.append(f"\n## Sheet: {sheet_name}{pg_note}\n")
 
-        data_rows = []
-        for row in ws.iter_rows(values_only=True):
-            if any(cell is not None for cell in row):
-                data_rows.append(list(row))
-
-        if not data_rows:
-            lines.append("_（空表）_\n")
+        rows_data = _extract_excel_table_with_spans(ws)
+        if not rows_data:
+            lines.append("_(空表)_\n")
             continue
 
-        headers = [_make_serializable(c) for c in data_rows[0]]
-        lines.append("| " + " | ".join(str(h) for h in headers) + " |")
-        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-        for row in data_rows[1:]:
-            row_vals = [_make_serializable(c) for c in row]
-            row_str = " | ".join(str(v) for v in row_vals)
-            lines.append("| " + row_str + " |")
+        lines.append(_table_to_markdown_with_spans(rows_data))
         lines.append("")
 
     return "\n".join(lines)
 
 
 # ---------- Word 提取 ----------
-    """用 python-docx 提取 Word 内容，输出与 PDF 相同的 JSON 结构"""
+    """用 python-docx 提取 Word 内容,输出与 PDF 相同的 JSON 结构"""
     from docx import Document
 
     doc = Document(docx_path)
@@ -1180,7 +1570,7 @@ def extract_excel_to_markdown(xlsx_path: str, page_hints: dict = None) -> str:
 
 
 def extract_word_to_markdown(docx_path: str) -> str:
-    """用 python-docx 提取 Word 内容，输出 Markdown（与 PDF 提取的 .md 格式一致）"""
+    """用 python-docx 提取 Word 内容,输出 Markdown(与 PDF 提取的 .md 格式一致)"""
     from docx import Document
 
     doc = Document(docx_path)
@@ -1210,25 +1600,25 @@ def extract_word_to_markdown(docx_path: str) -> str:
             lines.append(text)
             in_table = False
 
-    # 处理表格
+    # 处理表格(支持 colspan/row_span 渲染)
     for table in doc.tables:
-        rows_text = []
-        for row in table.rows:
-            row_text = " | ".join(cell.text.strip() for cell in row.cells)
-            rows_text.append(row_text)
-
-        if rows_text:
+        rows_data = _extract_docx_table_with_spans(table)
+        if rows_data:
             lines.append("")
-            lines.append(rows_text[0])  # 表头
-            lines.append(" | ".join(["---"] * len(rows_text[0].split(" | "))))  # 分隔线
-            for row in rows_text[1:]:
-                lines.append(row)
+            lines.append(_table_to_markdown_with_spans(rows_data))
 
     return "\n".join(lines)
 
 
-def extract_word_to_json(docx_path: str) -> dict:
-    """用 python-docx 提取 Word 内容，输出 JSON 格式（与 PDF 提取的 JSON 格式一致）"""
+def extract_word_to_json(docx_path: str,
+                            extract_page_numbers: bool = True) -> dict:
+    """
+    用 python-docx 提取 Word 内容,输出 JSON 格式(与 PDF 提取的 JSON 格式一致)。
+
+    参数:
+      extract_page_numbers: 是否提取真实页码(内部自动 Word→PDF→opendataloader→页码匹配)。
+                              关闭时 page=1(纯 docx 提取,无外部依赖)。
+    """
     from docx import Document
 
     doc = Document(docx_path)
@@ -1236,28 +1626,24 @@ def extract_word_to_json(docx_path: str) -> dict:
     paragraph_index = 0
     table_index = 0
 
-    # 提取段落
+    # ---- 提取段落(暂时不填 page) ----
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
             continue
-
         style_name = para.style.name if para.style else ""
         heading_level = None
-
         if style_name.startswith("Heading") or (para.style and "Heading" in para.style.name):
-            # 检测标题级别
             for c in style_name:
                 if c.isdigit():
                     heading_level = int(c)
                     break
             if heading_level is None:
                 heading_level = 1
-
         elements.append({
             "type": "heading" if heading_level else "paragraph",
             "content": text,
-            "page": 1,
+            "page": None,       # 稍后填充
             "heading_level": heading_level,
             "paragraph_index": paragraph_index,
             "table_index": None,
@@ -1267,18 +1653,25 @@ def extract_word_to_json(docx_path: str) -> dict:
         })
         paragraph_index += 1
 
-    # 提取表格
+    # ---- 提取表格(带 colspan/row_span,暂时不填 page) ----
     for table in doc.tables:
-        rows_data = []
-        for row in table.rows:
-            row_cells = [cell.text.strip() for cell in row.cells]
-            rows_data.append(row_cells)
-
+        rows_data = _extract_docx_table_with_spans(table)
+        has_merged = any(
+            any(cs > 1 or rs > 1
+                for cs, rs in zip(r.get("col_span", []), r.get("row_span", [])))
+            for r in rows_data
+        )
+        has_nested_headers = False
+        if len(rows_data) >= 2:
+            first_col_spans = rows_data[0].get("col_span", [])
+            if any(cs > 1 for cs in first_col_spans):
+                has_nested_headers = True
         if rows_data:
+            md_table = _table_to_markdown_with_spans(rows_data)
             elements.append({
                 "type": "table",
-                "content": "",
-                "page": 1,
+                "content": md_table,
+                "page": None,
                 "heading_level": None,
                 "paragraph_index": None,
                 "table_index": table_index,
@@ -1286,46 +1679,95 @@ def extract_word_to_json(docx_path: str) -> dict:
                 "content_preview": f"表格 {table_index + 1}",
                 "original_word": docx_path,
                 "table_data": rows_data,
+                "has_merged_cells": has_merged,
+                "has_nested_headers": has_nested_headers,
             })
             table_index += 1
 
-    # 统一 kids 结构（与 PDF JSON 格式一致，供 compute_page_hash 兼容使用）
+    # ---- Word → PDF → opendataloader → 页码匹配 ----
+    page_map = {}          # element_index -> real_page
+    section_paths = {}     # element_index -> section_path_str
+    detected_pages = 1
+
+    if extract_page_numbers:
+        try:
+            # Step 1: Word → PDF
+            pdf_path = convert_word_to_pdf(docx_path, output_dir="/tmp")
+            # Step 2: opendataloader 提取 PDF 页码位置
+            env = os.environ.copy()
+            env["JAVA_HOME"] = JAVA_HOME
+            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
+            cmd = [
+                sys.executable, "-m", "opendataloader_pdf",
+                pdf_path, "-o", "/tmp", "-f", "json", "-q"
+            ]
+            subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+            import glob as _glob
+            pdf_jsons = _glob.glob("/tmp/*.json")
+            pdf_flat = []
+            for jf in pdf_jsons:
+                try:
+                    with open(jf, encoding="utf-8") as f:
+                        d = json.load(f)
+                    kids_raw = d.get("kids", [])
+                    if not kids_raw:
+                        def _flat(k, out):
+                            for item in k:
+                                out.append(item)
+                                if "kids" in item:
+                                    _flat(item["kids"], out)
+                        _flat(d.get("kids", []), kids_raw)
+                    pdf_flat.extend(kids_raw)
+                except Exception:
+                    pass
+            # Step 3: 建立 PDF position map
+            pdf_pos_map = extract_pdf_positions(pdf_flat)
+            detected_pages = max(
+                [e.get("page number", 1) for e in pdf_flat] or [1])
+            # Step 4: 逐元素匹配页码
+            seen_tables_set = set()
+            seen_paras_set = set()
+            for i, elem in enumerate(elements):
+                matched = find_best_pdf_match(elem, pdf_pos_map,
+                                              seen_tables_set, seen_paras_set)
+                if matched:
+                    pg = matched.get("page")
+                    if pg:
+                        page_map[i] = pg
+                    sp = matched.get("section_path")
+                    if sp:
+                        section_paths[i] = sp
+            # 清理临时 PDF
+            Path(pdf_path).unlink(missing_ok=True)
+            for jf in pdf_jsons:
+                Path(jf).unlink(missing_ok=True)
+        except Exception as e:
+            print(f"[警告] Word 页码提取失败: {e}, page=1", file=sys.stderr)
+
+    # ---- 回填 page 和 section_path ----
+    for i, elem in enumerate(elements):
+        elem["page"] = page_map.get(i, 1)
+        if section_paths.get(i):
+            elem["section_path"] = section_paths[i]
+
+    # ---- kids:直接从 elements 复制(含 page_number) ----
     kids = []
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-        style_name = para.style.name if para.style else ""
-        heading_level = None
-        if style_name.startswith("Heading") or (para.style and "Heading" in para.style.name):
-            for c in style_name:
-                if c.isdigit():
-                    heading_level = int(c)
-                    break
-            if heading_level is None:
-                heading_level = 1
-        kids.append({
-            "type": "paragraph",
-            "page number": 1,
-            "content": text,
-            "heading_level": heading_level,
+    for e in elements:
+        ke = {
+            "type": e["type"],
+            "page number": e.get("page", 1),
+            "content": e.get("content", ""),
+            "heading_level": e.get("heading_level"),
             "bounding box": [0, 0, 0, 0],
-        })
-    for table in doc.tables:
-        rows_data = [[cell.text.strip() for cell in row.cells] for row in table.rows if row.cells]
-        if rows_data:
-            kids.append({
-                "type": "table",
-                "page number": 1,
-                "content": "\n".join([" | ".join(row) for row in rows_data]),
-                "table_data": rows_data,
-                "bounding box": [0, 0, 0, 0],
-            })
+        }
+        if e["type"] == "table":
+            ke["table_data"] = e.get("table_data", [])
+        kids.append(ke)
 
     return {
         "doc_type": "word",
         "original_word": docx_path,
-        "number of pages": 1,
+        "number of pages": detected_pages,
         "kids": kids,
         "traceability": {
             "total_elements": len(elements),
@@ -1337,7 +1779,7 @@ def extract_word_to_json(docx_path: str) -> dict:
 
 
 def convert_word(input_path: str, output_dir: str, output_format: str = "markdown,json") -> dict:
-    """转换 Word 文档，统一输出格式"""
+    """转换 Word 文档,统一输出格式"""
     os.makedirs(output_dir, exist_ok=True)
 
     basename = Path(input_path).stem
@@ -1375,7 +1817,7 @@ def convert_word(input_path: str, output_dir: str, output_format: str = "markdow
                 f.write(para.text + "\n")
         result["files_created"].append(text_path)
 
-    # 如果格式都不对，默认输出 markdown 和 json
+    # 如果格式都不对,默认输出 markdown 和 json
     if not result["files_created"]:
         json_data = extract_word_to_json(input_path)
         md_data = extract_word_to_markdown(input_path)
@@ -1408,11 +1850,11 @@ def find_java():
 
 def classify_pages(pdf_path: str) -> dict:
     """
-    逐页分类 PDF，每页独立判断是 digital 还是 scanned
+    逐页分类 PDF,每页独立判断是 digital 还是 scanned
     返回: {
         "total_pages": int,
-        "digital_pages": [int, ...],   # 有文字的页（1-indexed）
-        "scanned_pages": [int, ...],     # 无文字的页（1-indexed）
+        "digital_pages": [int, ...],   # 有文字的页(1-indexed)
+        "scanned_pages": [int, ...],     # 无文字的页(1-indexed)
         "per_page": {page_num: "digital"|"scanned"},  # 每页单独结果
         "lang": "auto"|"zh"|"en",
     }
@@ -1453,7 +1895,7 @@ def classify_pages(pdf_path: str) -> dict:
             result["lang"] = "en"
 
     except ImportError:
-        print("[警告] pypdf 未安装，逐页分类失败", file=sys.stderr)
+        print("[警告] pypdf 未安装,逐页分类失败", file=sys.stderr)
     except Exception as e:
         print(f"[警告] 逐页分类异常: {e}", file=sys.stderr)
 
@@ -1462,7 +1904,7 @@ def classify_pages(pdf_path: str) -> dict:
 
 def detect_pdf_type(pdf_path: str) -> dict:
     """
-    检测 PDF 类型（整体判断，用于兼容模式）
+    检测 PDF 类型(整体判断,用于兼容模式)
     返回: {
         "type": "digital" | "scanned" | "mixed",
         "lang": "auto" | "zh" | "en" | "mixed",
@@ -1490,13 +1932,13 @@ def detect_pdf_type(pdf_path: str) -> dict:
         reader = PdfReader(pdf_path)
         result["total_pages"] = len(reader.pages)
 
-        # 检查前5页（统计有文字的页数）
-        # 采样策略：取文档前中后三个区段，避免封面/目录页干扰
+        # 检查前5页(统计有文字的页数)
+        # 采样策略:取文档前中后三个区段,避免封面/目录页干扰
         total_pages = len(reader.pages)
         sample_indices = (
-            list(range(0, min(3, total_pages))) +       # 前段：第1-3页
+            list(range(0, min(3, total_pages))) +       # 前段:第1-3页
             list(range(total_pages // 2 - 1, total_pages // 2 + 1)) +  # 中段
-            list(range(max(0, total_pages - 3), total_pages))          # 后段：最后3页
+            list(range(max(0, total_pages - 3), total_pages))          # 后段:最后3页
         )
         sample_indices = sorted(set(i for i in sample_indices if i < total_pages))
 
@@ -1517,18 +1959,18 @@ def detect_pdf_type(pdf_path: str) -> dict:
         result["scanned_pages"] = scanned_pages
         result["text_pages"] = text_count
 
-        # 判断类型（任一采样页为扫描版即触发 OCR）
+        # 判断类型(任一采样页为扫描版即触发 OCR)
         if scanned_pages == 0:
             result["type"] = "digital"
         elif text_count == 0:
             result["type"] = "scanned"
         else:
-            result["type"] = "mixed"  # 混合：部分扫描+部分文字
+            result["type"] = "mixed"  # 混合:部分扫描+部分文字
 
-        # 语言检测（基于提取的文字）
+        # 语言检测(基于采样页提取的文字)
         all_text = ""
-        for page in reader.pages[:sample_pages]:
-            all_text += (page.extract_text() or "")
+        for i in sample_indices:
+            all_text += (reader.pages[i].extract_text() or "")
 
         # 简单的中英文检测
         chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', all_text))
@@ -1542,24 +1984,24 @@ def detect_pdf_type(pdf_path: str) -> dict:
             result["lang"] = "auto"
 
     except ImportError:
-        print("[警告] pypdf 未安装，无法自动检测，使用默认配置（digital）", file=sys.stderr)
+        print("[警告] pypdf 未安装,无法自动检测,使用默认配置(digital)", file=sys.stderr)
     except Exception as e:
-        print(f"[警告] PDF 检测失败: {e}，使用默认配置（digital）", file=sys.stderr)
+        print(f"[警告] PDF 检测失败: {e},使用默认配置(digital)", file=sys.stderr)
 
     return result
 
 
 def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
     """
-    合并两个来源的结果：
-    - digital_result: opendataloader 处理数字页的输出（kids 结构）
-    - ocr_result: qwen2.5vl 处理扫描页的输出（kids 结构）
-    按 page_number 排序，合并为统一的 kids 结构
+    合并两个来源的结果:
+    - digital_result: opendataloader 处理数字页的输出(kids 结构)
+    - ocr_result: qwen2.5vl 处理扫描页的输出(kids 结构)
+    按 page_number 排序,合并为统一的 kids 结构
     """
     digital_kids = digital_result.get("kids", []) if digital_result else []
     ocr_kids = ocr_result.get("kids", []) if ocr_result else []
 
-    # 全部收集，按 page_number 分组
+    # 全部收集,按 page_number 分组
     all_elements = {}
 
     for elem in digital_kids:
@@ -1574,7 +2016,7 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
             all_elements[pg] = []
         all_elements[pg].append(elem)
 
-    # 按页号排序，收集所有元素
+    # 按页号排序,收集所有元素
     merged_kids = []
     total_tables = 0
     total_paras = 0
@@ -1625,18 +2067,21 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                          force_qwen: bool = False,
                          skip_server: bool = False) -> dict:
     """
-    逐页自适应处理 PDF：
-    1. 逐页分类（digital / scanned）
-    2. 所有 PDF 类型都使用 qwen2.5vl（保证表格结构）
-       - digital-only: qwen2.5vl 全页 OCR（慢但保表格结构）
-       - scanned-only: qwen2.5vl 全页 OCR（有表格结构）
-       - mixed: qwen2.5vl 全链路（所有页都用，保障表格）
-       - force_qwen=False 时 digital-only 可降级为 opendataloader（快，约2秒）
-    3. 合并结果统一输出
+    逐页独立判断 + 最佳方法处理：
+    对每一页单独判断类型（digital/scanned），并选择最适合的提取方法。
+
+    处理逻辑（每页独立决策）：
+      - scanned 页面（无文字） → qwen2.5vl OCR
+      - digital 页面有表格（含疑似合并单元格） → qwen2.5vl OCR（精确结构）
+      - digital 页面纯文本 → opendataloader fast（快）
+      - 提取失败 → 自动降级
+
+    执行策略（高效版，非逐页重复调用）：
+      1. 逐页分类（pypdf，无成本）
+      2. digital 页批量 opendataloader 一次扫描 → 找出有表格的页
+      3. 有表格的 digital 页 + 全部 scanned 页 → qwen2.5vl（VRAM 感知）
+      4. 纯文本 digital 页 → opendataloader fast 结果直接用
     """
-    import io  # 用于扫描页图像渲染
-    import base64  # 用于图像base64编码
-    import urllib.request  # 用于调用Ollama API
     result = {
         "success": False,
         "pdf_path": pdf_path,
@@ -1644,25 +2089,81 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
         "mode_used": "per-page-adaptive",
     }
 
-    # Step 1: 逐页分类
+    # ---- Step 1: 逐页分类（pypdf，无成本） ----
     print(f"[Step 1/4] 逐页分类 PDF 类型...")
     classification = classify_pages(pdf_path)
     digital_pages = classification["digital_pages"]
     scanned_pages = classification["scanned_pages"]
     lang = classification.get("lang", "auto")
-
+    per_page = classification.get("per_page", {})
     total = classification["total_pages"]
     print(f"[      ] 总页数: {total} | digital: {len(digital_pages)} | scanned: {len(scanned_pages)}")
-    print(f"[      ] 逐页分类: {classification['per_page']}")
 
     if not digital_pages and not scanned_pages:
         print("[错误] 无法读取 PDF 页", file=sys.stderr)
         return result
-    # 全部是 digital 页 → qwen2.5vl（保表格结构），队列等待VRAM
-    if not scanned_pages:
-        print(f"[Step 2/4] 全部 {len(digital_pages)} 页为数字页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
 
-        # 队列等待VRAM（最多等5分钟，每10秒轮询）
+    # ---- Step 2: digital 页批量扫描（一次性找出有表格的页） ----
+    page_elements = {}   # {page_num: [elem, ...]}
+    page_has_table = {}   # {page_num: True/False}
+    page_text_kids = {}  # opendataloader 的 digital 页文本结果
+
+    if digital_pages:
+        print(f"[Step 2/4] digital 页批量快速扫描（{len(digital_pages)} 页）...")
+        env = os.environ.copy()
+        env["JAVA_HOME"] = JAVA_HOME
+        env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
+        cmd = build_opendataloader_cmd(pdf_path, output_dir,
+                                       {"type": "digital", "lang": lang, "total_pages": total},
+                                       output_format)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+            if proc.returncode == 0:
+                import glob as _glob
+                basename_str = Path(pdf_path).stem
+                json_files = _glob.glob(os.path.join(output_dir, f"{basename_str}*.json"))
+                for jf in json_files:
+                    with open(jf, encoding="utf-8") as f:
+                        od_data = json.load(f)
+                    kids_raw = od_data.get("kids", [])
+                    if not kids_raw:
+                        def _flat(kids, out):
+                            for k in kids:
+                                out.append(k)
+                                if "kids" in k:
+                                    _flat(k["kids"], out)
+                        _flat(od_data.get("kids", []), kids_raw)
+                    for k in kids_raw:
+                        pg = k.get("page number", 1)
+                        if pg not in page_elements:
+                            page_elements[pg] = []
+                        page_elements[pg].append(k)
+                        if k.get("type") == "table":
+                            # 检查列数是否均匀（不均匀→疑似合并单元格）
+                            td = k.get("table_data")
+                            if td and isinstance(td, list) and len(td) > 1:
+                                col_counts = [len(r) for r in td if isinstance(r, list)]
+                                if col_counts and (min(col_counts) < max(col_counts)):
+                                    page_has_table[pg] = True
+                                    continue
+                            page_has_table[pg] = True
+        except Exception as e:
+            print(f"[警告] digital 页批量扫描失败: {e}，所有 digital 页当纯文本处理", file=sys.stderr)
+
+        # 分类 digital 页：有表格 vs 纯文本
+        digital_with_tables = [pg for pg in digital_pages if page_has_table.get(pg)]
+        digital_text_only   = [pg for pg in digital_pages if pg not in page_has_table]
+        print(f"[      ] digital 扫描结果：{len(digital_with_tables)} 页有表格，{len(digital_text_only)} 页纯文本")
+    else:
+        digital_with_tables = []
+        digital_text_only   = []
+
+    # ---- Step 3: qwen2.5vl 处理需要 OCR 的页（有表格的 digital + 全部 scanned） ----
+    ocr_pages = list(set(digital_with_tables + scanned_pages))
+    ocr_kids_by_page = {}  # {page_num: [elem, ...]}
+
+    if ocr_pages:
+        print(f"[Step 3/4] {len(ocr_pages)} 页需要 qwen2.5vl OCR（VRAM 感知队列）...")
         _got_vram = False
         _vm = None
         try:
@@ -1676,234 +2177,121 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                 _vram_free = _status.get("vram_free_mb", 0)
                 _state = _status.get("state", "?")
                 if _vram_free >= 18000:
-                    # 尝试获取VRAM
                     if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
                         _got_vram = True
                         break
                 if _waited == 0:
-                    print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
+                    print(f"[      ] VRAM 排队等待（free={_vram_free}MB）...")
                 _time.sleep(10)
                 _waited += 10
-                if _waited % 30 == 0:
-                    print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
-            if not _got_vram and _waited > 0:
-                print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
         except Exception as _e:
-            print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
-
-        # 执行 qwen2.5vl OCR
-        ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
-        if ocr_result.get("success") and ocr_result.get("json_path"):
-            try:
-                with open(ocr_result["json_path"], encoding="utf-8") as f:
-                    ocr_json = json.load(f)
-                kids_data = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
-                final_json = {
-                    "doc_type": "digital_pdf_qwen",
-                    "source": "qwen2.5vl",
-                    "kids": kids_data,
-                    "total_tables": ocr_json.get("traceability", {}).get("total_tables", 0),
-                    "total_paragraphs": ocr_json.get("traceability", {}).get("total_paragraphs", 0),
-                }
-                basename = Path(pdf_path).stem
-                merged_json_path = Path(output_dir) / f"{basename}.json"
-                with open(merged_json_path, "w", encoding="utf-8") as f:
-                    json.dump(final_json, f, ensure_ascii=False, indent=2)
-                md_content = convert_pdf_to_markdown_merged(final_json)
-                md_path = Path(output_dir) / f"{basename}.md"
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(md_content)
-                result["success"] = True
-                result["mode_used"] = "per-page-digital-qwen"
-                result["files_created"] = [str(merged_json_path), str(md_path)]
-                print(f"[成功] digital+qwen2.5vl 完成: {len(kids_data)} kids, {ocr_json.get('traceability',{}).get('total_tables',0)} 表格")
-                return result
-            except Exception as e:
-                print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
-
-        # qwen2.5vl 失败，opendataloader 保底
-        if not force_qwen:
-            print(f"[警告] qwen2.5vl 失败（VRAM未释放或执行失败），降级到 opendataloader fast...")
-            detection = {"type": "digital", "lang": lang, "total_pages": total}
-            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-            env = os.environ.copy()
-            env["JAVA_HOME"] = JAVA_HOME
-            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-                if proc.returncode == 0:
-                    result["success"] = True
-                    result["mode_used"] = "per-page-digital-only-fallback"
-                    return result
-            except Exception as e:
-                print(f"[警告] opendataloader 备选也失败: {e}", file=sys.stderr)
-        if force_qwen:
-            print(f"[警告] qwen2.5vl 失败（force_qwen=True 禁止降级），返回失败")
-        return result
-
-
-        return result
-
-
-        # 全部是 scanned 页 → 队列等待VRAM后用 qwen2.5vl
-        if not digital_pages:
-            print(f"[Step 2/4] 全部 {len(scanned_pages)} 页为扫描页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
-            _got_vram = False
-            _vm = None
-            try:
-                sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
-                from vram_manager import VMgr
-                _vm = VMgr()
-                import time as _time
-                _waited = 0
-                while _waited < 300:
-                    _status = _vm.status()
-                    _vram_free = _status.get("vram_free_mb", 0)
-                    _state = _status.get("state", "?")
-                    if _vram_free >= 18000:
-                        if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
-                            _got_vram = True
-                            break
-                    if _waited == 0:
-                        print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
-                    _time.sleep(10)
-                    _waited += 10
-                    if _waited % 30 == 0:
-                        print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
-                if not _got_vram and _waited > 0:
-                    print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
-            except Exception as _e:
-                print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
-
-            ocr_result = qwen_ocr_pdf(pdf_path=pdf_path, output_dir=output_dir, lang=lang)
-            if ocr_result.get("success") and ocr_result.get("json_path"):
+            print(f"[警告] VRAM 队列异常: {_e}", file=sys.stderr)
+        finally:
+            if _vm is not None:
                 try:
-                    with open(ocr_result["json_path"], encoding="utf-8") as f:
-                        ocr_json = json.load(f)
-                    kids_data = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
-                    final_json = {
-                        "doc_type": "scanned_pdf_qwen",
-                        "source": "qwen2.5vl",
-                        "kids": kids_data,
-                        "total_tables": ocr_json.get("traceability", {}).get("total_tables", 0),
-                        "total_paragraphs": ocr_json.get("traceability", {}).get("total_paragraphs", 0),
-                    }
-                    basename = Path(pdf_path).stem
-                    merged_json_path = Path(output_dir) / f"{basename}.json"
-                    with open(merged_json_path, "w", encoding="utf-8") as f:
-                        json.dump(final_json, f, ensure_ascii=False, indent=2)
-                    md_content = convert_pdf_to_markdown_merged(final_json)
-                    md_path = Path(output_dir) / f"{basename}.md"
-                    with open(md_path, "w", encoding="utf-8") as f:
-                        f.write(md_content)
-                    result["success"] = True
-                    result["mode_used"] = "per-page-scanned-only"
-                    result["files_created"] = [str(merged_json_path), str(md_path)]
-                    print(f"[成功] scanned+qwen2.5vl 完成: {len(kids_data)} kids, {ocr_json.get('traceability',{}).get('total_tables',0)} 表格")
-                    return result
-                except Exception as e:
-                    print(f"[警告] 处理 qwen2.5vl 结果失败: {e}", file=sys.stderr)
-            # 失败保底
-            print(f"[警告] qwen2.5vl 失败，降级到 opendataloader...")
-            detection = {"type": "scanned", "lang": lang, "total_pages": total}
-            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-            env = os.environ.copy()
-            env["JAVA_HOME"] = JAVA_HOME
-            env["PATH"] = JAVA_HOME + "/bin:" + env.get("PATH", "")
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-                if proc.returncode == 0:
-                    result["success"] = True
-                    result["mode_used"] = "per-page-ocr-fallback"
-                    return result
-            except:
-                pass
-            return result
+                    _vm.release_and_restore()
+                except Exception:
+                    pass
 
+        # 逐页渲染 + qwen2.5vl OCR（每页独立，精准控制）
+        for pg_num in sorted(ocr_pages):
+            print(f"[      ]   处理第 {pg_num}/{total} 页 → qwen2.5vl")
+            render_dir = os.path.join(output_dir, f"_page_{pg_num:04d}_render")
+            os.makedirs(render_dir, exist_ok=True)
+            img_map = _render_pdf_pages_as_images(pdf_path, [pg_num], render_dir)
+            if not img_map:
+                print(f"[警告]   第 {pg_num} 页渲染失败，跳过")
+                continue
+            img_path = img_map.get(pg_num)
+            if not img_path:
+                continue
+            elems = _ocr_images_with_qwen([img_path], lang=lang)
+            for e in elems:
+                e["page_number"] = pg_num
+            ocr_kids_by_page[pg_num] = elems
 
-        # 混合 PDF（digital + scanned）：所有页都用 qwen2.5vl，队列等待VRAM
-        print(f"[Step 2/4] 混合 PDF，所有 {total} 页，队列等待VRAM后用 qwen2.5vl（最多等5分钟）...")
+    # ---- Step 4: 合并所有结果 ----
+    merged_kids = []
+    total_tables = total_paras = 0
+    total_merged = total_nested = total_diagonal = 0
 
-        _got_vram = False
-        _vm = None
-        try:
-            sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
-            from vram_manager import VMgr
-            _vm = VMgr()
-            import time as _time
-            _waited = 0
-            while _waited < 300:
-                _status = _vm.status()
-                _vram_free = _status.get("vram_free_mb", 0)
-                _state = _status.get("state", "?")
-                if _vram_free >= 18000:
-                    if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
-                        _got_vram = True
-                        break
-                if _waited == 0:
-                    print(f"[      ] VRAM 排队等待（当前free={_vram_free}MB, ComfyUI state={_state}）...")
-                _time.sleep(10)
-                _waited += 10
-                if _waited % 30 == 0:
-                    print(f"[      ] VRAM 等待中... {_waited}s/300s (free={_vram_free}MB)")
-            if not _got_vram and _waited > 0:
-                print(f"[      ] VRAM 等待结束({_waited}s)，尝试直接执行...")
-        except Exception as _e:
-            print(f"[警告] VRAM 队列异常: {_e}，直接尝试 qwen2.5vl...", file=sys.stderr)
+    def _count_elem(elem):
+        nonlocal total_tables, total_paras, total_merged, total_nested, total_diagonal
+        if elem.get("type") == "table":
+            total_tables += 1
+            if elem.get("has_merged_cells"):
+                total_merged += 1
+            if elem.get("has_nested_headers"):
+                total_nested += 1
+            if elem.get("has_diagonal_header"):
+                total_diagonal += 1
+        elif elem.get("type") in ("paragraph", "heading"):
+            total_paras += 1
 
-        tmp_scanned_dir = os.path.join(output_dir, "_tmp_scanned")
-        os.makedirs(tmp_scanned_dir, exist_ok=True)
+    # digital 纯文本页 → opendataloader 结果
+    for pg in sorted(digital_text_only):
+        for elem in page_elements.get(pg, []):
+            merged_kids.append(elem)
+            _count_elem(elem)
 
-        ocr_call_result = qwen_ocr_pdf(
-            pdf_path=pdf_path,
-            output_dir=tmp_scanned_dir,
-            lang=lang,
-            pages_to_skip=[],  # 处理全部页（digital 页也会重新提取以保留表格）
-        )
+    # digital 有表格页 → qwen2.5vl 结果（覆盖 opendataloader）
+    for pg in sorted(digital_with_tables):
+        if pg in ocr_kids_by_page:
+            for elem in ocr_kids_by_page[pg]:
+                merged_kids.append(elem)
+                _count_elem(elem)
+        else:
+            # qwen2.5vl 失败的保底：用 opendataloader 结果
+            for elem in page_elements.get(pg, []):
+                merged_kids.append(elem)
+                _count_elem(elem)
 
-        ocr_result = {}
-        if ocr_call_result.get("success") and ocr_call_result.get("json_path"):
-            try:
-                with open(ocr_call_result["json_path"], encoding="utf-8") as f:
-                    ocr_json = json.load(f)
-                ocr_result["kids"] = ocr_json.get("elements") or ocr_json.get("flat_elements", [])
-                ocr_result["total_tables"] = ocr_json.get("traceability", {}).get("total_tables", 0)
-                ocr_result["total_paragraphs"] = ocr_json.get("traceability", {}).get("total_paragraphs", 0)
-            except Exception as e:
-                print(f"[警告] 加载 OCR 结果失败: {e}", file=sys.stderr)
+    # scanned 页 → qwen2.5vl 结果
+    for pg in sorted(scanned_pages):
+        if pg in ocr_kids_by_page:
+            for elem in ocr_kids_by_page[pg]:
+                merged_kids.append(elem)
+                _count_elem(elem)
 
-        print(f"[Step 4/4] 生成最终 JSON 和 Markdown...")
+    final_json = {
+        "doc_type": "pdf",
+        "source": "per-page-adaptive",
+        "total_pages": total,
+        "total_tables": total_tables,
+        "total_paragraphs": total_paras,
+        "total_merged_tables": total_merged,
+        "total_nested_tables": total_nested,
+        "total_diagonal_tables": total_diagonal,
+        "kids": merged_kids,
+    }
 
-        merged = ocr_result if ocr_result else {"kids": [], "total_tables": 0, "total_paragraphs": 0}
-        merged.setdefault("kids", merged.pop("elements", merged.pop("flat_elements", [])))
+    basename_out = Path(pdf_path).stem
+    merged_json_path = Path(output_dir) / f"{basename_out}.json"
+    with open(merged_json_path, "w", encoding="utf-8") as f:
+        json.dump(final_json, f, ensure_ascii=False, indent=2)
+    md_content = convert_pdf_to_markdown_merged(final_json)
+    md_path = Path(output_dir) / f"{basename_out}.md"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
 
-        basename = Path(pdf_path).stem
-        merged_json_path = Path(output_dir) / f"{basename}.json"
-        with open(merged_json_path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, ensure_ascii=False, indent=2)
+    result["success"] = True
+    result["mode_used"] = "per-page-adaptive"
+    result["files_created"] = [str(merged_json_path), str(md_path)]
+    result["classification"] = {
+        "total": total,
+        "digital": digital_pages,
+        "scanned": scanned_pages,
+        "digital_with_tables": digital_with_tables,
+        "digital_text_only": digital_text_only,
+        "scanned_pages": scanned_pages,
+        "lang": lang,
+    }
 
-        md_content = convert_pdf_to_markdown_merged(merged)
-        md_path = Path(output_dir) / f"{basename}.md"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
-
-        import shutil
-        shutil.rmtree(tmp_scanned_dir, ignore_errors=True)
-
-        print(f"[成功] 逐页自适应处理完成！")
-        print(f"[INFO] 生成文件:")
-        print(f"  JSON: {merged_json_path}  (内容:{len(merged.get('kids', []))}元素 | 表格:{merged.get('total_tables', 0)} | 段落:{merged.get('total_paragraphs', 0)})")
-        print(f"  MD:   {md_path}")
-
-        result["success"] = True
-        result["files_created"] = [str(merged_json_path), str(md_path)]
-        result["classification"] = {
-            "total": total,
-            "digital": digital_pages,
-            "scanned": scanned_pages,
-            "lang": lang,
-        }
-        return result
+    print(f"[成功] 逐页处理完成：{total_tables} 表格（含 {total_merged} 张含合并单元格），{total_paras} 段落")
+    print(f"[      ] 纯文本digital页{len(digital_text_only)}页(opendataloader) | "
+          f"有表格digital页{len(digital_with_tables)}页(qwen2.5vl) | "
+          f"scanned页{len(scanned_pages)}页(qwen2.5vl)")
+    return result
 
 
 
@@ -1939,11 +2327,11 @@ def start_hybrid_server(force_ocr: bool = False, ocr_lang: str = "auto",
                          enrich_formula: bool = False,
                          enrich_picture: bool = False,
                          port: int = HYBRID_SERVER_PORT) -> bool:
-    """启动 Hybrid server（后台运行）"""
+    """启动 Hybrid server(后台运行)"""
 
     # 检查是否已有运行中的 server
     if is_server_running(port):
-        print(f"[INFO] Hybrid server 已在运行 (port {port})，跳过启动。")
+        print(f"[INFO] Hybrid server 已在运行 (port {port}),跳过启动。")
         return True
 
     cmd = [JAVA_BIN, "-jar",
@@ -1976,7 +2364,7 @@ def start_hybrid_server(force_ocr: bool = False, ocr_lang: str = "auto",
             stderr=subprocess.STDOUT,
         )
 
-        # 等待 server 启动（最多30秒）
+        # 等待 server 启动(最多30秒)
         for _ in range(30):
             time.sleep(1)
             if proc.poll() is not None:
@@ -2036,6 +2424,50 @@ def stop_hybrid_server():
                           capture_output=True)
 
 
+def _post_process_opendataloader_output(pdf_path: str, output_dir: str) -> None:
+    """
+    opendataloader 输出的 JSON 不含 colspan/row_span。
+    本函数对每张表格追加 has_merged_cells 检测(通过列数异常推断),
+    并将结果写回 JSON 文件。
+
+    注意:这是"尽力而为"的推断,无法还原精确的 colspan/row_span 值。
+    如需精确值,请使用 qwen2.5vl OCR(process_pdf_per_page 路径)。
+    """
+    import glob
+    basename = Path(pdf_path).stem
+    json_files = glob.glob(os.path.join(output_dir, f"{basename}*.json"))
+    for json_path_str in json_files:
+        json_path = Path(json_path_str)
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        modified = False
+        for elem in data.get("kids", []):
+            if elem.get("type") == "table":
+                table_data = elem.get("table_data")
+                if table_data and isinstance(table_data, list):
+                    flat, has_merged = _detect_merged_cells_from_flat(table_data)
+                    if has_merged:
+                        elem["has_merged_cells"] = True
+                        modified = True
+        for elem in data.get("flat_elements", []):
+            if elem.get("type") == "table":
+                table_data = elem.get("table_data")
+                if table_data and isinstance(table_data, list):
+                    flat, has_merged = _detect_merged_cells_from_flat(table_data)
+                    if has_merged:
+                        elem["has_merged_cells"] = True
+                        modified = True
+
+        if modified:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"[INFO] 表格合并单元格检测:{json_path.name} 已更新 has_merged_cells 标记")
+
+
 def build_opendataloader_cmd(pdf_path: str, output_dir: str,
                               detection_info: dict,
                               output_format: str = "markdown,json") -> list:
@@ -2052,7 +2484,7 @@ def build_opendataloader_cmd(pdf_path: str, output_dir: str,
     pdf_type = detection_info["type"]
 
     if pdf_type == "digital":
-        # 标准数字 PDF → 本地 Fast 模式，不需要 server
+        # 标准数字 PDF → 本地 Fast 模式,不需要 server
         return [sys.executable, "-m", "opendataloader_pdf",
                 pdf_path, "-o", output_dir, "-f", output_format]
 
@@ -2086,8 +2518,8 @@ def run_convert(pdf_path: str, output_dir: str,
         output_format: 输出格式 (json, markdown, html, text 等)
         auto_detect: 是否自动检测 PDF 类型
         force_mode: 强制模式 ("fast" | "hybrid")
-        skip_server: 跳过启动 server（server 已由外部启动）
-        force_qwen: 跳过 Hybrid，直接用 qwen2.5vl + Fast（禁用 EasyOCR 作为备选）
+        skip_server: 跳过启动 server(server 已由外部启动)
+        force_qwen: 跳过 Hybrid,直接用 qwen2.5vl + Fast(禁用 EasyOCR 作为备选)
     """
 
     result = {
@@ -2102,7 +2534,7 @@ def run_convert(pdf_path: str, output_dir: str,
         "returncode": None,
     }
 
-    # ---- Excel 文档：openpyxl直接提取 + PDF位置辅助 ----
+    # ---- Excel 文档:openpyxl直接提取 + PDF位置辅助 ----
     ext_lower = pdf_path.lower()
     if ext_lower.endswith(".xlsx") or ext_lower.endswith(".xls"):
         print(f"[INFO] 检测到 Excel 文档 → openpyxl 提取 + PDF位置辅助")
@@ -2110,12 +2542,12 @@ def run_convert(pdf_path: str, output_dir: str,
         os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # Step 1: openpyxl 提取（结构化数据 + 表格 + 图表）
+            # Step 1: openpyxl 提取(结构化数据 + 表格 + 图表)
             print(f"[Step 1/3] Excel 数据提取...")
             excel_data = extract_excel_to_json(pdf_path)
 
-            # Step 2: Excel → PDF（用于页码位置）
-            print(f"[Step 2/3] Excel → PDF（用于提取位置信息）...")
+            # Step 2: Excel → PDF(用于页码位置)
+            print(f"[Step 2/3] Excel → PDF(用于提取位置信息)...")
             pdf_converted = convert_word_to_pdf(pdf_path, output_dir="/tmp")
 
             # Step 3: PDF 位置提取
@@ -2130,7 +2562,7 @@ def run_convert(pdf_path: str, output_dir: str,
                 capture_output=True, text=True, env=env, timeout=300
             )
 
-            # 匹配：按 sheet 名称匹配 page（改进版）
+            # 匹配:按 sheet 名称匹配 page(改进版)
             pdf_page_by_sheet = {}
             pdf_page_count = 0
 
@@ -2140,7 +2572,7 @@ def run_convert(pdf_path: str, output_dir: str,
 
                 pdf_page_count = pdf_data.get("number of pages", 0)
 
-                # 策略1：收集每页的全部文本
+                # 策略1:收集每页的全部文本
                 page_texts = {}  # page_num -> all_text
                 for elem in pdf_data.get("flat_elements", []):
                     pg = elem.get("page number") or elem.get("page", "?")
@@ -2149,7 +2581,7 @@ def run_convert(pdf_path: str, output_dir: str,
                         page_texts[pg] = ""
                     page_texts[pg] += " " + txt
 
-                # 策略2：建立每页的标题词集合（用于模糊匹配）
+                # 策略2:建立每页的标题词集合(用于模糊匹配)
                 page_headings = {}  # page_num -> set of heading words
                 for elem in pdf_data.get("flat_elements", []):
                     if elem.get("type") == "heading":
@@ -2167,7 +2599,7 @@ def run_convert(pdf_path: str, output_dir: str,
                 for sh in sheets:
                     sh_normalized = sh.strip()
 
-                    # 精确匹配：sheet 名出现在某页
+                    # 精确匹配:sheet 名出现在某页
                     matched = False
                     for pg, full_text in page_texts.items():
                         if sh_normalized and sh_normalized[:15] in full_text:
@@ -2175,7 +2607,7 @@ def run_convert(pdf_path: str, output_dir: str,
                             matched = True
                             break
 
-                    # 模糊匹配：共享词汇多的页面
+                    # 模糊匹配:共享词汇多的页面
                     if not matched:
                         sh_words = set(re.findall(r"[\w\W]{2,}", sh_normalized))
                         best_pg, best_score = None, 0
@@ -2189,13 +2621,13 @@ def run_convert(pdf_path: str, output_dir: str,
                             pdf_page_by_sheet[sh] = best_pg
                             matched = True
 
-                    # 未匹配到：不记录（页码留空，人工核对）
+                    # 未匹配到:不记录(页码留空,人工核对)
                     if not matched:
                         pdf_page_by_sheet[sh] = None
 
                 pdf_json_path.unlink(missing_ok=True)
 
-            # 为每个元素写入 PDF 页码（写入 location["pdf_page"]）
+            # 为每个元素写入 PDF 页码(写入 location["pdf_page"])
             matched_sheets = {}
             for elem in excel_data.get("elements", []):
                 sh = elem.get("location", {}).get("excel", "") if isinstance(elem.get("location"), dict) else elem.get("sheet", "")
@@ -2212,15 +2644,15 @@ def run_convert(pdf_path: str, output_dir: str,
             excel_data["pdf_page_matched"] = len(matched_sheets)
             excel_data["pdf_page_unmatched"] = len(sheets) - len(matched_sheets)
 
-            # 输出 sheet→页码映射供核对（仅显示已匹配到的）
+            # 输出 sheet→页码映射供核对(仅显示已匹配到的)
             matched_sheets = {sh: pg for sh, pg in pdf_page_by_sheet.items() if pg}
             if matched_sheets:
-                print(f"[INFO] Sheet → PDF页码 映射（共 {pdf_page_count} 页，已匹配 {len(matched_sheets)}/{len(sheets)} 个Sheet）:")
+                print(f"[INFO] Sheet → PDF页码 映射(共 {pdf_page_count} 页,已匹配 {len(matched_sheets)}/{len(sheets)} 个Sheet):")
                 for sh, pg in matched_sheets.items():
                     print(f"       Sheet「{sh}」→ PDF第 {pg} 页")
             if len(matched_sheets) < len(sheets):
                 unmatched = [sh for sh in sheets if sh not in matched_sheets]
-                print(f"[INFO] 以下 Sheet 未匹配到页码（PDF中未出现Sheet名，请人工核对）:")
+                print(f"[INFO] 以下 Sheet 未匹配到页码(PDF中未出现Sheet名,请人工核对):")
                 for sh in unmatched:
                     print(f"       Sheet「{sh}」→ 需人工确认页码")
 
@@ -2239,7 +2671,7 @@ def run_convert(pdf_path: str, output_dir: str,
             # 清理临时 PDF
             Path(pdf_converted).unlink(missing_ok=True)
 
-            print(f"[成功] Excel 提取完成！")
+            print(f"[成功] Excel 提取完成!")
             print(f"[INFO] 生成文件:")
             print(f"  JSON: {json_path}")
             print(f"  MD:   {md_path}")
@@ -2265,10 +2697,10 @@ def run_convert(pdf_path: str, output_dir: str,
             traceback.print_exc()
             return {"success": False, "mode_used": "excel-failed", "error": str(e)}
 
-    # ---- Word 文档：docx内容 + PDF位置 → 合并 ----
+    # ---- Word 文档:docx内容 + PDF位置 → 合并 ----
     ext_lower = pdf_path.lower()
     if ext_lower.endswith(".docx") or ext_lower.endswith(".doc"):
-        print(f"[INFO] 检测到 Word 文档 → 三步处理：docx提取 + PDF位置提取 → 智能合并")
+        print(f"[INFO] 检测到 Word 文档 → 三步处理:docx提取 + PDF位置提取 → 智能合并")
         original_basename = Path(pdf_path).stem
         os.makedirs(output_dir, exist_ok=True)
 
@@ -2278,10 +2710,10 @@ def run_convert(pdf_path: str, output_dir: str,
 
         try:
             # Step 1: Word → PDF
-            print(f"[Step 1/3] Word → PDF（用于提取位置信息）...")
+            print(f"[Step 1/3] Word → PDF(用于提取位置信息)...")
             pdf_converted = convert_word_to_pdf(pdf_path, output_dir="/tmp")
 
-            # Step 2: PDF 位置提取（page / bbox / section_path）
+            # Step 2: PDF 位置提取(page / bbox / section_path)
             print(f"[Step 2/3] PDF 位置提取...")
             pdf_json_cmd = [
                 sys.executable, "-m", "opendataloader_pdf",
@@ -2296,7 +2728,7 @@ def run_convert(pdf_path: str, output_dir: str,
                 with open(pdf_json_path, encoding="utf-8") as f:
                     pdf_data = json.load(f)
                 pdf_flat = pdf_data.get("flat_elements", [])
-                # 兼容：无 flat_elements 时用 kids 扁平化
+                # 兼容:无 flat_elements 时用 kids 扁平化
                 if not pdf_flat and "kids" in pdf_data:
                     pdf_flat = []
                     heading_path = []
@@ -2320,17 +2752,17 @@ def run_convert(pdf_path: str, output_dir: str,
 
             print(f"[      ] PDF 提取到 {len(pdf_flat)} 个位置元素")
 
-            # Step 3: docx 内容提取（表格完整 + 文本完整）
-            print(f"[Step 3/3] docx 内容提取（完整表格/文本）...")
+            # Step 3: docx 内容提取(表格完整 + 文本完整)
+            print(f"[Step 3/3] docx 内容提取(完整表格/文本)...")
             docx_data = extract_word_to_json(pdf_path)  # 用已有的 docx 提取函数
 
             # Step 4: 智能合并
-            print(f"[      ] 智能合并：docx内容 + PDF位置 → 统一结构")
+            print(f"[      ] 智能合并:docx内容 + PDF位置 → 统一结构")
             merged = merge_docx_and_pdf(docx_data, pdf_flat)
 
-            # Fallback：合并失败（0元素）时，直接使用 docx 原始内容
+            # Fallback:合并失败(0元素)时,直接使用 docx 原始内容
             if not merged.get("elements") and not merged.get("kids"):
-                print(f"[警告] PDF位置匹配失败（0元素），Fallback：直接使用 docx 内容", file=sys.stderr)
+                print(f"[警告] PDF位置匹配失败(0元素),Fallback:直接使用 docx 内容", file=sys.stderr)
                 merged = docx_data  # 直接用 extract_word_to_json 的完整输出
                 merged["kids"] = merged.pop("elements", merged.get("kids", []))
                 merged["original_word"] = os.path.abspath(pdf_path)
@@ -2345,7 +2777,7 @@ def run_convert(pdf_path: str, output_dir: str,
             with open(merged_json_path, "w", encoding="utf-8") as f:
                 json.dump(merged, f, ensure_ascii=False, indent=2)
 
-            # 生成 Markdown（基于 docx 内容，带 section_path）
+            # 生成 Markdown(基于 docx 内容,带 section_path)
             md_content = f"# {original_basename}\n\n"
             md_content += convert_word_to_markdown(pdf_path)
             md_path = Path(output_dir) / f"{original_basename}.md"
@@ -2353,12 +2785,12 @@ def run_convert(pdf_path: str, output_dir: str,
                 f.write(md_content)
 
             match_stats = merged.get("_pdf_position_hints", {})
-            print(f"[成功] 合并完成！")
+            print(f"[成功] 合并完成!")
             print(f"[INFO] 生成文件:")
             print(f"  JSON: {merged_json_path}  (内容:{len(merged.get('kids', []) or merged.get('elements', []))}元素 | 表格:{merged.get('total_tables', 0)} | 段落:{merged.get('total_paragraphs', 0)})")
             print(f"  PDF位置匹配: 表格匹配{match_stats.get('tables_matched','?')}个, 段落匹配{match_stats.get('paras_matched','?')}个")
             print(f"  MD:   {md_path}")
-            print(f"[INFO] 临时PDF已清理（{pdf_converted}）")
+            print(f"[INFO] 临时PDF已清理({pdf_converted})")
 
             # 清理临时 PDF
             Path(pdf_converted).unlink(missing_ok=True)
@@ -2376,7 +2808,7 @@ def run_convert(pdf_path: str, output_dir: str,
             print(f"[错误] 合并流程失败: {e}")
             import traceback
             traceback.print_exc()
-            # 降级：仅 docx 直接提取
+            # 降级:仅 docx 直接提取
             word_result = convert_word(pdf_path, output_dir, output_format)
             word_result["mode_used"] = "word-direct-fallback"
             return word_result
@@ -2385,11 +2817,11 @@ def run_convert(pdf_path: str, output_dir: str,
         return word_result
 
     # ---- PDF 处理 ----
-    # pdf_path 已在参数中传入，继续使用
+    # pdf_path 已在参数中传入,继续使用
 
     # 验证 Java
     if not find_java():
-        print("[错误] Java 不可用，请检查 JAVA_HOME 设置", file=sys.stderr)
+        print("[错误] Java 不可用,请检查 JAVA_HOME 设置", file=sys.stderr)
         return result
 
     # 解析 PDF 路径
@@ -2420,10 +2852,10 @@ def run_convert(pdf_path: str, output_dir: str,
     print(f"[INFO] 执行命令: {' '.join(cmd)}")
 
     # ============================================================
-    # 逐页自适应处理：digital 页用 opendataloader，scanned 页用 OCR
+    # 逐页自适应处理:digital 页用 opendataloader,scanned 页用 OCR
     # ============================================================
     if detection["type"] in ("scanned", "mixed") and not skip_server:
-        print(f"\n[INFO] PDF 类型: {detection['type']}，启用逐页自适应处理")
+        print(f"\n[INFO] PDF 类型: {detection['type']},启用逐页自适应处理")
         per_page_result = process_pdf_per_page(
             pdf_path=pdf_path,
             output_dir=output_dir,
@@ -2438,13 +2870,13 @@ def run_convert(pdf_path: str, output_dir: str,
             result["classification"] = per_page_result.get("classification", {})
             return result
         else:
-            # 逐页处理失败，降级到传统 Fast 模式
-            print("[警告] 逐页处理失败，降级到 Fast 本地模式...", file=sys.stderr)
+            # 逐页处理失败,降级到传统 Fast 模式
+            print("[警告] 逐页处理失败,降级到 Fast 本地模式...", file=sys.stderr)
             detection["type"] = "digital"
             cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
             result["command"] = " ".join(cmd)
     else:
-        # digital PDF：直接构建命令
+        # digital PDF:直接构建命令
         cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
         result["command"] = " ".join(cmd)
 
@@ -2469,13 +2901,15 @@ def run_convert(pdf_path: str, output_dir: str,
             result["success"] = True
             result["mode_used"] = detection["type"]
             print(f"[成功] 输出已保存到: {output_dir}")
+            # Post-process: opendataloader 输出的 JSON 中,表格追加 has_merged_cells 检测
+            _post_process_opendataloader_output(pdf_path, output_dir)
         else:
             print(f"[错误] 转换失败 (返回码 {proc.returncode}):", file=sys.stderr)
             print(proc.stderr[:500] if proc.stderr else proc.stdout[:500], file=sys.stderr)
 
     except subprocess.TimeoutExpired:
-        result["stderr"] = "超时（5分钟）"
-        print("[错误] 转换超时（5分钟）", file=sys.stderr)
+        result["stderr"] = "超时(5分钟)"
+        print("[错误] 转换超时(5分钟)", file=sys.stderr)
     except Exception as e:
         result["stderr"] = str(e)
         print(f"[错误] {e}", file=sys.stderr)
@@ -2486,13 +2920,13 @@ def run_convert(pdf_path: str, output_dir: str,
 # ---------- CLI 入口 ----------
 def main():
     parser = argparse.ArgumentParser(
-        description="PDF/Word 文档自动检测与转换工具（统一接口）"
+        description="PDF/Word 文档自动检测与转换工具(统一接口)"
     )
     parser.add_argument("input", help="输入 PDF 文件路径")
     parser.add_argument("-o", "--output", required=True, help="输出目录")
     parser.add_argument("-f", "--format",
                         default="markdown,json",
-                        help="输出格式（逗号分隔，默认 markdown,json）")
+                        help="输出格式(逗号分隔,默认 markdown,json)")
     parser.add_argument("--no-auto-detect", dest="auto_detect",
                         action="store_false", default=True,
                         help="禁用自动检测")
@@ -2501,13 +2935,13 @@ def main():
                         default=None,
                         help="强制指定模式")
     parser.add_argument("--skip-server", action="store_true",
-                        help="跳过 server 启动（server 已运行时使用）")
+                        help="跳过 server 启动(server 已运行时使用)")
     parser.add_argument("--stop-server", action="store_true",
                         help="停止 Hybrid server")
     parser.add_argument("--detect-only", action="store_true",
-                        help="仅检测 PDF 类型，不执行转换")
+                        help="仅检测 PDF 类型,不执行转换")
     parser.add_argument("--force-qwen", action="store_true",
-                        help="跳过 Hybrid，直接用 qwen2.5vl + Fast（禁用 EasyOCR 作为备选）")
+                        help="跳过 Hybrid,直接用 qwen2.5vl + Fast(禁用 EasyOCR 作为备选)")
 
     args = parser.parse_args()
 
