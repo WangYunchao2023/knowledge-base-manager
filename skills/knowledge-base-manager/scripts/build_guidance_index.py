@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 1.0.0
+版本: 2.8.0
 功能: 自动扫描"供AI用信息"目录，生成 guidance_index.json 索引文件
 用法: python build_guidance_index.py
 """

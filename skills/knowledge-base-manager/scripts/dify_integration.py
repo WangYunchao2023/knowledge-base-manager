@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: Dify RAG 对接模块（骨架实现，待 Docker/Dify 安装后完善）
       将法规指导原则库的 .md 文件同步到 Dify 数据集
 

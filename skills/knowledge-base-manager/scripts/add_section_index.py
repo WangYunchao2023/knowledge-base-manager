@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: 为 guidance_index.json 的每个文档添加章节索引（section_index）
        让 Cortana 回答时能给出"文件 > 章节 > 具体位置"
 

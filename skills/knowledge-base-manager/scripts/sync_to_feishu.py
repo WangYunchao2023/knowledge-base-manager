@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 1.0.0
+版本: 2.8.0
 功能: 将本地 Markdown 文档同步到飞书知识库
 用法: python sync_to_feishu.py
 依赖: 需要设置环境变量或直接在代码中配置飞书 API
