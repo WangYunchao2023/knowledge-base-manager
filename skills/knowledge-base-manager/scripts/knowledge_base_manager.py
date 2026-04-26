@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.2.0
+版本: 2.8.0
 功能: 法规指导原则知识库管理器
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 

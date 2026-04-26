@@ -226,12 +226,12 @@ python3 dify_integration.py --sync      # 同步所有 .md 到 Dify
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| **v2.8.0** | **2026-04-26** | **与opendataloader-pdf v2.8.0同步：Word页码提取/数字PDF逐页感知处理/Excel合并单元格/opendataloader升级** |
-| **v2.7.0** | **2026-04-26** | **opendataloader-pdf同步至v2.7.0：真正逐页独立决策处理** |
-| **v3.3.0** | **2026-04-26** | **表格结构增强：Word/docx新增col_span/row_span提取；数字PDF追加has_merged_cells推算标记** |
+| **v2.8.0** | **2026-04-26** | **与opendataloader-pdf v2.8.0同步：Word真实页码/数字PDF逐页感知/Excel合并单元格/opendataloader升级** |
+| **v3.0.0** | **2026-04-24** | **知识库管理器大版本升级（见commit 256e6f5）** |
 | **v3.1.0** | **2026-04-25** | **内容哈希升级：PDF前两页逐页比对 + 提取失败自动重试** |
-| **v2.1.0** | **2026-04-24** | **全自动 graphify 触发：job queue + cron + openclaw agent 后台执行** |
-| v2.0.0 | 2026-04-24 | 去飞书 + 加 graphify/dify 钩子 + watchdog 监控进程 |
+| **v3.2.0** | **2026-04-25** | **PDF逐页自适应：digital页→opendataloader，scanned页→qwen2.5vl，混合页自动结合** |
+| v2.1.0 | 2026-04-24 | 全自动 graphify 触发：job queue + cron + openclaw agent 后台执行 |
+| v2.0.0 | 2026-04-24 | 去飞书 + graphify/dify 钩子 + watchdog 监控进程 |
 | v1.0.0 | 2026-04-02 | 整合版：原始文件归档 + opendataloader 提取 + 索引更新 + 飞书同步 |
 | v0.1.0 | 2026-04-02 | 初始版本（仅索引更新）|
 

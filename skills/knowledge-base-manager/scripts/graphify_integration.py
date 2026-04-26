@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: Graphify 图谱对接模块
       通过 OpenClaw Agent 执行 /graphify skill 流程，构建法规库知识图谱
       支持多分类目录（化学药/中药/生物制品/通用）统一建图
