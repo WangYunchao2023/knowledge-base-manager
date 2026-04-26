@@ -1,9 +1,16 @@
 ---
 name: opendataloader-pdf
-version: 2.3.0
-version_date: 2026-04-25
+version: 2.8.0
+version_date: 2026-04-26
 description: 文档解析工具（统一处理 PDF / Word / Excel）。数字 PDF 用 Fast 模式（本地），扫描 PDF 优先使用 qwen2.5vl（VLM，表格理解最强），qwen2.5vl 失败后自动降级到 Hybrid/EasyOCR（深度学习 OCR）。Word 采用「docx内容 + PDF位置」合并；Excel 采用「openpyxl结构化数据 + Sheet名标记」。统一输出 JSON（含 location/headers/data_rows）和 Markdown，方便 AI 读取、分析、汇总与自动撰写。
 ---
+
+## v2.4.0 (2026-04-26) 表格结构增强
+- **Word 表格**：新增 `col_span`/`row_span` 提取（读取 gridSpan/vMerge XML），支持合并单元格还原
+- **Word Markdown**：表格渲染时正确展开 colspan 横向合并
+- **数字 PDF**：opendataloader 输出追加 `has_merged_cells` 推算标记（列数异常推断，"尽力而为"，无法还原精确值）
+- **数字 PDF 精确合并单元格**：请使用 `--force-qwen` 强制 qwen2.5vl OCR 路径
+
 
 # opendataloader-pdf SKILL
 
