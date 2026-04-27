@@ -43,6 +43,7 @@
 | 2026-04-24 | **opendataloader --pages参数**：会导致所有元素page_number=None，需要后处理补全页码（文本匹配+顺序分配） |
 | 2026-04-24 | **vram_manager调用**：路径`/home/wangyc/.openclaw/scripts/vram_manager.py`；推荐CLI模式`python3 ~/.openclaw/scripts/vram_manager.py acquire|release|status`跨session调用 |
 | 2026-04-25 | **数据展示禁止主动推测**：检索和展示数据时，只呈现文件原文提取的原始值和标签，不得推测、填补或脑补附加信息（如温度、浓度、实验条件等未在原文中明确的内容） |
+| 2026-04-27 | **下载链接不可见≠没有**：JS动态渲染、CDN未加载、倒计时/验证等因素会导致下载链接暂时不可见；遇到"找不到下载链接"时，应先等待足够时间或确认页面已完全加载，而非直接判定为无下载链接 |
 
 ## 会话保存规范
 
