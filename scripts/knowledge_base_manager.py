@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-版本: 2.9.0
-功能: 法规指导原则知识库管理器
+版本: 2.10.0
+功能: 法规指导原则知识库管理器（v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复）
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
 用法:
@@ -330,10 +330,14 @@ def load_index():
 def save_index(index_data):
     index_data["last_updated"] = datetime.now().strftime("%Y-%m-%d")
     try:
-        v = float(index_data.get("version", "1.0"))
-        index_data["version"] = str(v + 0.1)
+        v_str = str(index_data.get("version", "1.0"))
+        if "." in v_str:
+            v = float(v_str)
+            index_data["version"] = str(round(v + 0.1, 1))
+        else:
+            index_data["version"] = str(int(v_str) + 1)
     except ValueError:
-        index_data["version"] = "3.0"
+        index_data["version"] = "1.0"
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(index_data, f, ensure_ascii=False, indent=2)
 
@@ -428,6 +432,55 @@ def scan_for_new_files(scan_dirs, indexed_ids):
                     continue
                 new_files.append({"path": full_path, "name": fname, "ext": ext})
     return new_files
+
+def rebuild_index_from_disk(kb_root, index_data):
+    """扫描 KB 目录下所有已提取的 .md/.json，将缺少索引条目的文件补入 index_data。"""
+    CATEGORY_SUBDIRS_LOCAL = ['化学药', '中药', '生物制品', '通用']
+    DOC_TYPES_LOCAL = ['稳定性', '临床研究', '药理学', '毒理学', '质量标准', '申报注册', '其他']
+    added = []
+    existing_ids = {d['id'] for d in index_data['documents']}
+
+    for cat in CATEGORY_SUBDIRS_LOCAL:
+        cat_path = os.path.join(kb_root, cat)
+        if not os.path.isdir(cat_path):
+            continue
+        for sub in DOC_TYPES_LOCAL:
+            md_dir = os.path.join(cat_path, sub, DIR_EXTRACTED)
+            if not os.path.isdir(md_dir):
+                continue
+            for fname in os.listdir(md_dir):
+                if not fname.endswith('.md'):
+                    continue
+                meta = parse_filename_for_meta(fname)
+                if meta['id'] in existing_ids:
+                    continue
+                json_path = os.path.join(md_dir, fname.replace('.md', '.json'))
+                if not os.path.exists(json_path):
+                    continue
+                rel_prefix = os.path.join(cat, sub)
+                content_hash = compute_content_hash_from_pages(json_path) if os.path.exists(json_path) else None
+                entry = {
+                    'id': meta['id'],
+                    'title': meta['title'],
+                    'issue_date': meta['issue_date'],
+                    'status': meta['status'],
+                    'doc_type': meta['doc_type'],
+                    'scope': {'category': meta['category'], 'type': meta['drug_types']},
+                    'tags': meta['tags'],
+                    'content_hash': content_hash,
+                    'paths': {
+                        'raw': '',
+                        'markdown': os.path.join(rel_prefix, DIR_EXTRACTED, fname),
+                        'json': os.path.join(rel_prefix, DIR_EXTRACTED, fname.replace('.md', '.json')),
+                        'graph_url': ''
+                    },
+                    'source_subdir': os.path.join(cat, sub)
+                }
+                index_data['documents'].append(entry)
+                existing_ids.add(meta['id'])
+                added.append(meta['title'])
+                print(f'  🔧 [磁盘恢复] {meta["title"]} [{cat}/{sub}]')
+    return added
 
 # ---- 单文件处理 ----
 
@@ -810,14 +863,20 @@ def main():
     
     if "--rebuild" in args:
         log("重建索引模式", "🔨")
-        index_data = {
-            "version": "3.1",
-            "last_updated": "",
-            "kb_root": KB_ROOT,
-            "total_docs": 0,
-            "documents": []
-        }
+        index_data = load_index()
+        print(f"  当前索引: {len(index_data['documents'])} 条记录")
+        added = rebuild_index_from_disk(KB_ROOT, index_data)
+        print(f"  磁盘恢复: {len(added)} 条新增")
         new_files = scan_for_new_files(SRC_SCAN_DIRS, set())
+        print(f"  新增文件: {len(new_files)} 个")
+    elif "--recover" in args:
+        index_data = load_index()
+        print(f"  当前索引: {len(index_data['documents'])} 条记录")
+        added = rebuild_index_from_disk(KB_ROOT, index_data)
+        print(f"  磁盘恢复: {len(added)} 条新增入库")
+        save_index(index_data)
+        print(f"  索引已保存（共 {len(index_data['documents'])} 条）")
+        return
     elif len(args) > 0:
         input_path = args[0]
         if os.path.isfile(input_path):
@@ -839,24 +898,33 @@ def main():
         new_files = scan_for_new_files(SRC_SCAN_DIRS, indexed_ids)
     
     if not new_files:
-        log("没有发现新增文件，知识库已是最新", "✅")
+        log(f"没有发现新增文件，知识库已是最新", "✅")
         if "--hooks" in args:
             hook_name = args[args.index("--hooks") + 1] if args.index("--hooks") + 1 < len(args) else "all"
             results = trigger_hooks(hook_name.split(","))
             print_report(new_files, index_data, [], results)
         return
-    
+
     log(f"发现 {len(new_files)} 个新文件", "🆕")
     print()
-    
+
     ensure_dirs(KB_ROOT)
     
     processed = []
     for i, f in enumerate(new_files, 1):
         print(f"\n--- [{i}/{len(new_files)}] ---")
-        meta = process_new_file(f, index_data)
-        processed.append(meta)
-    
+        try:
+            meta = process_new_file(f, index_data)
+            processed.append(meta)
+        except Exception as e:
+            print(f"  ❌ 处理失败: {f['name']}，错误: {e}", file=sys.stderr)
+            continue
+        # 每处理1个文件保存一次（崩溃不丢进度）
+        save_index(index_data)
+        # 每处理10个文件输出进度
+        if i % 10 == 0:
+            print(f"\n💾 [进度] 已处理 {i}/{len(new_files)} 个文件", flush=True)
+
     save_index(index_data)
     
     # 更新章节索引和页码索引

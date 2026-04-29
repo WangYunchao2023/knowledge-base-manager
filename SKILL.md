@@ -1,6 +1,6 @@
 ---
 name: knowledge-base-manager
-version: 2.9.0
+version: 2.10.0
 version_date: 2026-04-29
 description: |
   修复 v2.8.0 bug: check_duplicate_by_hash 中 stored=None 时调用 get() 导致崩溃。
