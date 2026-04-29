@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.2.0
+版本: 2.9.0
 功能: 法规指导原则知识库管理器
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
@@ -561,6 +561,8 @@ def check_duplicate_by_hash(extracted_json, index_data):
     if pdf_byte:
         for doc in index_data.get("documents", []):
             stored = doc.get("content_hash", {})
+            if stored is None or not isinstance(stored, dict):
+                continue
             if stored.get("pdf_byte") == pdf_byte:
                 return True, doc  # PDF 字节完全相同，判定为重复
 
@@ -826,6 +828,7 @@ def main():
         elif os.path.isdir(input_path):
             new_files = scan_for_new_files([input_path], set())
             log(f"扫描目录: {input_path}", "📂")
+            index_data = load_index()  # 加载索引
         else:
             log(f"路径不存在: {input_path}", "❌")
             return
