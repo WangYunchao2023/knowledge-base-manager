@@ -235,15 +235,15 @@ def _validate_extraction(extracted_base, output_dir):
     return True, "OK"
 
 
-def run_opendataloader(input_file, output_dir, force_mode=None):
+def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False):
     """
     调用 opendataloader 提取内容。
 
     PDF 使用逐页自适应处理（process_pdf_per_page）：
       - 每页独立判断：digital（有文字）→ opendataloader 快速提取
-      - scanned（纯图像）→ qwen2.5vl OCR
+      - scanned（纯图像）→ qwen2.5vl OCR（skip_qwen=True 时跳过，仅用 Fast）
       - 混合 PDF → 两种方式结合，保留最佳文本
-      - 无采样，不依赖封面/目录，全自动判断
+      - skip_qwen=True 时完全跳过 qwen2.5vl，用于批量处理数字 PDF 为主的场景
 
     DOCX 沿用 subprocess 调用（opendataloader CLI）。
     """
@@ -267,8 +267,9 @@ def run_opendataloader(input_file, output_dir, force_mode=None):
                 pdf_path=input_file,
                 output_dir=output_dir,
                 output_format="markdown,json",
-                force_qwen=False,   # digital-only 时允许降级到 opendataloader（快）
-                skip_server=False
+                force_qwen=False,
+                skip_server=False,
+                skip_qwen=skip_qwen
             )
         except Exception as e:
             return False, f"process_pdf_per_page 异常: {e}"
@@ -656,7 +657,7 @@ def process_new_file(f, index_data):
         log(f"  → 提取文件已存在，跳过 opendataloader", "⏭")
     else:
         log(f"  → 调用 opendataloader 提取内容...", "🔄")
-        success, result = run_opendataloader(raw_dest, extracted_abs)
+        success, result = run_opendataloader(raw_dest, extracted_abs, skip_qwen=True)
         if success:
             log(f"  → 内容提取完成", "✅")
         else:
@@ -778,8 +779,12 @@ def print_report(new_files, index_data, processed, hook_results=None):
         print(f"🆕 新增/更新文件: {len(new_files)} 个")
         print()
         for meta in processed:
+            if meta is None:
+                continue
             cat_dir, guidance_subdir, rel_prefix = resolve_destination_dir(meta)
-            print(f"  [{meta['category']}] {meta['title']}")
+            scope = meta.get("scope", {})
+            cat = scope.get("category", meta.get("category", "未知"))
+            print(f"  [{cat}] {meta['title']}")
             print(f"    ID: {meta['id']} | 状态: {meta['status']} | 类型: {meta['doc_type']}")
             print(f"    分类路径: {rel_prefix}/")
             print()

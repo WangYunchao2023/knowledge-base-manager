@@ -1,15 +1,16 @@
 ---
 name: knowledge-base-manager
-version: 2.10.0
+version: 2.11.0
 version_date: 2026-04-29
 description: |
-  修复 v2.8.0 bug: check_duplicate_by_hash 中 stored=None 时调用 get() 导致崩溃。
+  v2.11.0: 批量入库 skip_qwen 优化 — 数字 PDF 跳过 qwen2.5vl，批量速度提升 40 倍。
+  v2.10.0: 修复 check_duplicate_by_hash stored=None 崩溃、每文件保存、--recover 恢复。
   法规指导原则知识库管理与自动同步工具。
   功能：原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 自动触发 graphify 图谱构建（后台agent执行）
   触发条件：用户提到"知识库管理"、"更新知识库"、"添加指导原则"、"检查知识库"时使用。
 ---
 
-# SKILL.md - 法规指导原则知识库管理器 (v2.8.0)
+# SKILL.md - 法规指导原则知识库管理器 (v2.11.0)
 
 > 本 Skill 是「知识、信息层」的核心管理工具，实现知识库的**全自动化闭环维护**。
 > 支持三种入库方式，自动触发 graphify 图谱后台构建。
