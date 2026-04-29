@@ -7,7 +7,7 @@
 | Agent名称 | 路径 | 功能定位 |
 |-----------|------|---------|
 | **nonclinical-study-manager** | `~/.openclaw/workspace/agents/nonclinical-study-manager/` | 药品非临床试验项目管理，含方案生成、文档管理、进度跟踪、QA文件管理 |
-| **auto-stability-scheme** | `~/.openclaw/workspace/agents/auto-stability-scheme/` | 药品稳定性研究自动化系统 |
+| **auto-formula-scheme** | `~/.openclaw/workspace/agents/auto-formula-scheme/` | 药品稳定性研究自动化系统 |
 | **cde-monitor** | `~/.openclaw/workspace/agents/cde-monitor/` | CDE指导原则监控 |
 
 ---
@@ -17,7 +17,7 @@
 - 接到任何任务后，必须先查看 available_skills 清单
 - 存在相关 Skill 时，先读取对应 SKILL.md，按其说明执行
 - 只有 Skill 明确执行失败才允许手动操作
-- **自动状态同步**：关于药品稳定性研究自动化系统（auto-stability-scheme），只要在对话中进行了代码开发、调整或决策，**必须在任务完成时主动更新** `~/.openclaw/workspace/agents/auto-stability-scheme/Project_Blueprint.md` 的状态和日志，无需等待用户提醒。
+- **自动状态同步**：关于药品稳定性研究自动化系统（auto-formula-scheme），只要在对话中进行了代码开发、调整或决策，**必须在任务完成时主动更新** `~/.openclaw/workspace/agents/auto-formula-scheme/Project_Blueprint.md` 的状态和日志，无需等待用户提醒。
 
 ## 文件保存位置偏好
 

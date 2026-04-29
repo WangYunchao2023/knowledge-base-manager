@@ -15,9 +15,9 @@
 
 ## 文件发送权限
 
-- `auto-stability-scheme-feishu` 是唯一与飞书 bot 连接的 agent
-- `auto-stability-scheme` 是纯后端任务 agent，不与飞书 bot 直连
-- 收到需要发送文件的任务时，直接用 `message` 工具发送，不需要转发给 auto-stability-scheme
+- `auto-formula-scheme-feishu` 是唯一与飞书 bot 连接的 agent
+- `auto-formula-scheme` 是纯后端任务 agent，不与飞书 bot 直连
+- 收到需要发送文件的任务时，直接用 `message` 工具发送，不需要转发给 auto-formula-scheme
 - 使用 bot 身份（channel=feishu），不需要每次用户授权
 - 发送对象由任务决定（群聊或私聊）
 
@@ -25,7 +25,7 @@
 
 收到飞书消息时：
 1. 判断是否为合法任务请求（生成计划、查询状态、发送报告等）
-2. 合法请求 → 通过 sessions_send 转发给 auto-stability-scheme 执行
+2. 合法请求 → 通过 sessions_send 转发给 auto-formula-scheme 执行
 3. 敏感/越界请求 → 礼貌拒绝
 
 ## 风格

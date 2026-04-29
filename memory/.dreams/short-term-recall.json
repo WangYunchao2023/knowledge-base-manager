@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-04-25T02:52:26.396Z",
+  "updatedAt": "2026-04-29T00:53:24.089Z",
   "entries": {
     "memory:memory/2026-03-26.md:1:19": {
       "key": "memory:memory/2026-03-26.md:1:19",
@@ -143,13 +143,13 @@
       "endLine": 143,
       "source": "memory",
       "snippet": "- 取样日历事件（飞书日历） - 数据回收模块 - 报告生成模块 --- *最后更新：2026-04-02 21:07*",
-      "recallCount": 10,
+      "recallCount": 14,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 6.083906668052077,
+      "totalScore": 8.656415453925728,
       "maxScore": 0.6597357247024774,
       "firstRecalledAt": "2026-04-13T05:10:22.371Z",
-      "lastRecalledAt": "2026-04-25T02:52:26.396Z",
+      "lastRecalledAt": "2026-04-29T00:53:24.089Z",
       "queryHashes": [
         "bffe41bfd282",
         "c988dd1b3a69",
@@ -160,7 +160,11 @@
         "3d01c298d03c",
         "7c6e22793598",
         "64d3b4888d53",
-        "f3015921580a"
+        "f3015921580a",
+        "5c5563ba767c",
+        "5c0813acdb76",
+        "3cef063fc75a",
+        "74cfb19f2e2e"
       ],
       "recallDays": [
         "2026-04-13",
@@ -169,7 +173,9 @@
         "2026-04-18",
         "2026-04-19",
         "2026-04-21",
-        "2026-04-25"
+        "2026-04-25",
+        "2026-04-28",
+        "2026-04-29"
       ],
       "conceptTags": [
         "取样",
@@ -449,23 +455,25 @@
       "endLine": 22,
       "source": "memory",
       "snippet": "### 结果 - 用户两次反馈\"**还是不行**\" / \"**完全不对了**\" - 核心问题：过度关注底层代码变动，导致分析内容深度严重退化（汇总变薄、问题清单缺失） - **最终方案**：完整回滚至 v2.0.0 稳定版 ### 关键教训 | 教训 | 说明 | |------|------| | **分析深度不可妥协** | 任何技能优化都必须保证输出内容比之前更完整，绝不能用占位符或简化版 | | **实验分支需独立验证** | 新版本应在独立目录验证后再合入主框架 |",
-      "recallCount": 4,
+      "recallCount": 5,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 2.5796778861433265,
+      "totalScore": 3.231352154538035,
       "maxScore": 0.6629825472831725,
       "firstRecalledAt": "2026-04-14T12:47:01.827Z",
-      "lastRecalledAt": "2026-04-25T02:52:26.396Z",
+      "lastRecalledAt": "2026-04-27T07:53:00.083Z",
       "queryHashes": [
         "954b5d2c7cbc",
         "c02929f0d141",
         "310b09912c7d",
-        "f3015921580a"
+        "f3015921580a",
+        "3a346169c18b"
       ],
       "recallDays": [
         "2026-04-14",
         "2026-04-16",
-        "2026-04-25"
+        "2026-04-25",
+        "2026-04-27"
       ],
       "conceptTags": [
         "v2.0.0",
@@ -823,22 +831,24 @@
       "endLine": 126,
       "source": "memory",
       "snippet": "└── stability_plans/ # 生成的稳定性计划（输出物） └── {计划名称}/ └── {计划名称}_稳定性计划.md ``` ### 知识库（独立维护，位于 workspace/skills/） | Skill | 版本 | 用途 | |-------|------|------| | `knowledge-base-manager` | v1.0.0 | 知识库全流程管理（归档→提取→索引→同步）| | `opendataloader-pdf` | - | 文档解析提取 | | `guidance-web-access` | - | 法规网页访问下载 | ### 已生成的文件 - **稳定性方案初稿**： `~/Documents/工作/0 库/法规指导原则规定知识库/稳定性指导原则/稳定性计划/20260401_稳定性研究方案_初稿.md`",
-      "recallCount": 3,
+      "recallCount": 4,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 1.776676183193922,
+      "totalScore": 2.373251064866781,
       "maxScore": 0.6196676842868327,
       "firstRecalledAt": "2026-04-15T05:57:43.968Z",
-      "lastRecalledAt": "2026-04-24T07:42:48.974Z",
+      "lastRecalledAt": "2026-04-26T06:28:19.421Z",
       "queryHashes": [
         "8c5700ee9c54",
         "35e00c0abcf0",
-        "18bb39299e8f"
+        "18bb39299e8f",
+        "ff3c0b36535c"
       ],
       "recallDays": [
         "2026-04-15",
         "2026-04-23",
-        "2026-04-24"
+        "2026-04-24",
+        "2026-04-26"
       ],
       "conceptTags": [
         "stability-plans",
@@ -956,25 +966,29 @@
       "endLine": 35,
       "source": "memory",
       "snippet": "- 参芪扶正注射液多维度、多准则、中成药综合评价 (238文件) - 参芪扶正注射液再评价 (204文件) - 参芪扶正注射液岭南项目结题 (124文件) - 其他项目若干 ## 待处理 - 创建知识库核心Skill - 摄入测试文档 ## 笔记 - 后续将建立完整的药物研发知识库和工作流",
-      "recallCount": 5,
+      "recallCount": 7,
       "dailyCount": 0,
       "groundedCount": 0,
-      "totalScore": 3.1903210058808327,
+      "totalScore": 4.499437443166971,
       "maxScore": 0.6636010996997356,
       "firstRecalledAt": "2026-04-15T23:26:34.963Z",
-      "lastRecalledAt": "2026-04-25T02:52:26.396Z",
+      "lastRecalledAt": "2026-04-28T07:24:39.095Z",
       "queryHashes": [
         "c02929f0d141",
         "310b09912c7d",
         "64d3b4888d53",
         "02471faae3f3",
-        "f3015921580a"
+        "f3015921580a",
+        "3a346169c18b",
+        "5c0813acdb76"
       ],
       "recallDays": [
         "2026-04-16",
         "2026-04-21",
         "2026-04-23",
-        "2026-04-25"
+        "2026-04-25",
+        "2026-04-27",
+        "2026-04-28"
       ],
       "conceptTags": [
         "扶正",
@@ -1908,6 +1922,130 @@
         "简单流程图/时序图转",
         "完成",
         "内容"
+      ]
+    },
+    "memory:memory/2026-04-24.md:1:22": {
+      "key": "memory:memory/2026-04-24.md:1:22",
+      "path": "memory/2026-04-24.md",
+      "startLine": 1,
+      "endLine": 22,
+      "source": "memory",
+      "snippet": "# 2026-04-24 日志 ## 今日完成工作 ### 1. 法规指导原则知识库 v3.0.0 重大升级 **核心脚本版本统一为 v3.0.0：** - `knowledge_base_manager.py` → v3.0.0（新增自动分类功能） - `graphify_integration.py` → v3.0.0（支持多分类目录） - `graphify_job.py` → v3.0.0（支持多分类目录） - `add_section_index.py` → v1.0.0（新增，章节索引） - `add_page_index.py` → v1.0.0（新增，页码索引） - `SKILL.md` → v2.1.0 ### 2. 自动分类目录结构 ``` 法规指导原则规定知识库/ ├── 化学药/稳定性指导原则/ │ ├── 原始文件/（6个PDF） │ └── 供AI用信息/（.md + .json） ├── 中药/稳定性指导原则/",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.601148834824562,
+      "maxScore": 0.601148834824562,
+      "firstRecalledAt": "2026-04-26T06:28:23.011Z",
+      "lastRecalledAt": "2026-04-26T06:28:23.011Z",
+      "queryHashes": [
+        "84cf13ac5e62"
+      ],
+      "recallDays": [
+        "2026-04-26"
+      ],
+      "conceptTags": [
+        "v3.0.0",
+        "knowledge-base-manager.py",
+        "graphify-integration.py",
+        "graphify-job.py",
+        "add-section-index.py",
+        "v1.0.0",
+        "add-page-index.py",
+        "skill.md"
+      ]
+    },
+    "memory:memory/2026-04-02.md:16:25": {
+      "key": "memory:memory/2026-04-02.md:16:25",
+      "path": "memory/2026-04-02.md",
+      "startLine": 16,
+      "endLine": 25,
+      "source": "memory",
+      "snippet": "| 2 | 长期毒性/重复给药毒性试验 | 重复给药毒性研究 | | 3 | 安全药理学试验 | 对主要生理系统的影响 | | 4 | 毒代动力学试验 | 体内代谢研究 | | 5 | 非临床药代动力学试验 | ADME（吸收、分布、代谢、排泄） | | 6 | 临床药代动力学试验 | 人体药代动力学研究 | | 7 | 生殖毒性试验 | 一般生殖毒、致畸、围产期毒性 | | 8 | 遗传毒性试验 | Ames、微核、染色体畸变等 | | 9 | 致癌性研究 | 长期致癌性评估 | | 10 | 光安全性评价 | 光敏性评估（ICH S10） | | 11 | 局部毒性试验 | 皮肤/眼/肌肉刺激试验 |",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.6340461790561676,
+      "maxScore": 0.6340461790561676,
+      "firstRecalledAt": "2026-04-27T00:08:07.334Z",
+      "lastRecalledAt": "2026-04-27T00:08:07.334Z",
+      "queryHashes": [
+        "420132f0031c"
+      ],
+      "recallDays": [
+        "2026-04-27"
+      ],
+      "conceptTags": [
+        "长期毒性/重复给药毒性试验",
+        "皮肤/眼/肌肉刺激试验",
+        "长期",
+        "毒性",
+        "重复",
+        "试验",
+        "研究",
+        "安全"
+      ]
+    },
+    "memory:memory/2026-04-28.md:53:60": {
+      "key": "memory:memory/2026-04-28.md:53:60",
+      "path": "memory/2026-04-28.md",
+      "startLine": 53,
+      "endLine": 60,
+      "source": "memory",
+      "snippet": "之前的下载脚本搜索\"征求意见稿\"时，返回结果混合了： - ✅ 真正的征求意见稿（标题含\"征求意见稿\"） - ❌ 正式发布的通告（标题不含\"征求意见稿\"，但属于同一话题） 例如搜索\"急性淋巴细胞白血病\"： - 返回：《急性淋巴细胞白血病药物临床试验中检测微小残留病的技术指导原则》✅ 标题无\"征求意见稿\" - 但这个通告发布在\"征求意见稿\"Tab下，实际上是在征求意见的文件",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.6559999056160449,
+      "maxScore": 0.6559999056160449,
+      "firstRecalledAt": "2026-04-28T07:24:39.095Z",
+      "lastRecalledAt": "2026-04-28T07:24:39.095Z",
+      "queryHashes": [
+        "5c0813acdb76"
+      ],
+      "recallDays": [
+        "2026-04-28"
+      ],
+      "conceptTags": [
+        "之前",
+        "下载",
+        "脚本",
+        "搜索",
+        "征求",
+        "意见",
+        "返回",
+        "结果"
+      ]
+    },
+    "memory:memory/2026-04-27.md:38:44": {
+      "key": "memory:memory/2026-04-27.md:38:44",
+      "path": "memory/2026-04-27.md",
+      "startLine": 38,
+      "endLine": 44,
+      "source": "memory",
+      "snippet": "- `cde_final_download.py` - 最终版，等待时间充足（8秒+5秒） ### 教训 - CDE网站较慢，需要充足等待时间 - 部分早期指导原则确实无法下载，是网站数据问题而非脚本问题 - 断点机制对长任务很有必要",
+      "recallCount": 1,
+      "dailyCount": 0,
+      "groundedCount": 0,
+      "totalScore": 0.639275124669075,
+      "maxScore": 0.639275124669075,
+      "firstRecalledAt": "2026-04-29T00:53:12.598Z",
+      "lastRecalledAt": "2026-04-29T00:53:12.598Z",
+      "queryHashes": [
+        "ec1938d28be8"
+      ],
+      "recallDays": [
+        "2026-04-29"
+      ],
+      "conceptTags": [
+        "cde-final-download.py",
+        "最终",
+        "等待",
+        "时间",
+        "充足",
+        "教训",
+        "cde",
+        "网站"
       ]
     }
   }
