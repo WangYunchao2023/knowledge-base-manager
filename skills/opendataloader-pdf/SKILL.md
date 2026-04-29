@@ -1,8 +1,10 @@
 ---
 name: opendataloader-pdf
-version: 2.8.0
-version_date: 2026-04-26
-description: 文档解析工具（统一处理 PDF / Word / Excel）。数字 PDF 用 Fast 模式（本地），扫描 PDF 优先使用 qwen2.5vl（VLM，表格理解最强），qwen2.5vl 失败后自动降级到 Hybrid/EasyOCR（深度学习 OCR）。Word 采用「docx内容 + PDF位置」合并；Excel 采用「openpyxl结构化数据 + Sheet名标记」。统一输出 JSON（含 location/headers/data_rows）和 Markdown，方便 AI 读取、分析、汇总与自动撰写。
+version: 2.9.0
+version_date: 2026-04-29
+description: |
+  v2.9.0: 新增 skip_qwen 参数，跳过 qwen2.5vl 用于数字 PDF 批量处理（VRAM 无争抢，速度提升 40 倍）。
+  文档解析工具（统一处理 PDF / Word / Excel）。数字 PDF 用 Fast 模式（本地），扫描 PDF 优先使用 qwen2.5vl（VLM，表格理解最强），qwen2.5vl 失败后自动降级到 Hybrid/EasyOCR（深度学习 OCR）。Word 采用「docx内容 + PDF位置」合并；Excel 采用「openpyxl结构化数据 + Sheet名标记」。统一输出 JSON（含 location/headers/data_rows）和 Markdown，方便 AI 读取、分析、汇总与自动撰写。
 ---
 
 ## v2.4.0 (2026-04-26) 表格结构增强

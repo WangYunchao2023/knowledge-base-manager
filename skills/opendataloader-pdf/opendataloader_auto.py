@@ -28,6 +28,7 @@ import argparse
 import subprocess
 import time
 import re
+import tempfile
 from pathlib import Path
 from docx.oxml.ns import qn as _qn
 
@@ -1573,6 +1574,22 @@ def extract_word_to_markdown(docx_path: str) -> str:
     """用 python-docx 提取 Word 内容,输出 Markdown(与 PDF 提取的 .md 格式一致)"""
     from docx import Document
 
+    # ---- 处理旧版 .doc 格式(用 LibreOffice 转换为 .docx) ----
+    if docx_path.lower().endswith(".doc") and not docx_path.lower().endswith(".docx"):
+        try:
+            out_dir = os.path.dirname(os.path.abspath(docx_path)) or "."
+            base_name = os.path.splitext(os.path.basename(docx_path))[0]
+            temp_docx = os.path.join(out_dir, base_name + ".docx")
+            if os.path.exists(temp_docx):
+                os.unlink(temp_docx)
+            subprocess.run(["libreoffice", "--headless", "--convert-to", "docx",
+                           "--outdir", out_dir, docx_path],
+                          capture_output=True, text=True, timeout=60)
+            if os.path.exists(temp_docx):
+                docx_path = temp_docx
+        except Exception as e:
+            print(f"[警告] .doc→.docx 转换失败: {e}")
+
     doc = Document(docx_path)
     lines = []
     in_table = False
@@ -1620,6 +1637,31 @@ def extract_word_to_json(docx_path: str,
                               关闭时 page=1(纯 docx 提取,无外部依赖)。
     """
     from docx import Document
+
+    # ---- 处理旧版 .doc 格式(用 LibreOffice 转换为 .docx) ----
+    input_path = docx_path
+    temp_docx = None
+    if docx_path.lower().endswith(".doc") and not docx_path.lower().endswith(".docx"):
+        try:
+            # 直接在源文件目录输出 .docx，避免 tempfile 空文件阻塞 LibreOffice
+            out_dir = os.path.dirname(os.path.abspath(docx_path)) or "."
+            base_name = os.path.splitext(os.path.basename(docx_path))[0]
+            temp_docx = os.path.join(out_dir, base_name + ".docx")
+            # 先删除旧文件(如存在)
+            if os.path.exists(temp_docx):
+                os.unlink(temp_docx)
+            result = subprocess.run(
+                ["libreoffice", "--headless", "--convert-to", "docx",
+                 "--outdir", out_dir, docx_path],
+                capture_output=True, text=True, timeout=60
+            )
+            if os.path.exists(temp_docx):
+                docx_path = temp_docx
+            else:
+                temp_docx = None  # 转换失败
+        except Exception as e:
+            print(f"[警告] .doc→.docx 转换失败: {e}")
+            temp_docx = None
 
     doc = Document(docx_path)
     elements = []
@@ -1810,7 +1852,23 @@ def convert_word(input_path: str, output_dir: str, output_format: str = "markdow
 
     if "text" in formats:
         from docx import Document
-        doc = Document(input_path)
+        # ---- 处理旧版 .doc 格式 ----
+        _input = input_path
+        if input_path.lower().endswith(".doc") and not input_path.lower().endswith(".docx"):
+            try:
+                out_dir = os.path.dirname(os.path.abspath(input_path)) or "."
+                base_name = os.path.splitext(os.path.basename(input_path))[0]
+                _input = os.path.join(out_dir, base_name + ".docx")
+                if os.path.exists(_input):
+                    os.unlink(_input)
+                subprocess.run(["libreoffice", "--headless", "--convert-to", "docx",
+                                "--outdir", out_dir, input_path],
+                               capture_output=True, text=True, timeout=60)
+                if not os.path.exists(_input):
+                    _input = input_path  # 转换失败
+            except Exception:
+                _input = input_path
+        doc = Document(_input)
         text_path = os.path.join(output_dir, f"{basename}.txt")
         with open(text_path, "w", encoding="utf-8") as f:
             for para in doc.paragraphs:
@@ -2065,7 +2123,12 @@ def merge_per_page_results(digital_result: dict, ocr_result: dict) -> dict:
 def process_pdf_per_page(pdf_path: str, output_dir: str,
                          output_format: str = "markdown,json",
                          force_qwen: bool = False,
-                         skip_server: bool = False) -> dict:
+                         skip_server: bool = False,
+                         skip_qwen: bool = False) -> dict:
+    """
+    skip_qwen: True 时跳过 qwen2.5vl，即使 digital 页有表格也只用 Fast 模式。
+    用于数字 PDF 为主的批量处理（避免 VRAM 竞争）。
+    """
     """
     逐页独立判断 + 最佳方法处理：
     对每一页单独判断类型（digital/scanned），并选择最适合的提取方法。
@@ -2151,19 +2214,22 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
             print(f"[警告] digital 页批量扫描失败: {e}，所有 digital 页当纯文本处理", file=sys.stderr)
 
         # 分类 digital 页：有表格 vs 纯文本
-        digital_with_tables = [pg for pg in digital_pages if page_has_table.get(pg)]
-        digital_text_only   = [pg for pg in digital_pages if pg not in page_has_table]
+        digital_with_tables = [] if skip_qwen else [pg for pg in digital_pages if page_has_table.get(pg)]
+        digital_text_only   = digital_pages if skip_qwen else [pg for pg in digital_pages if pg not in page_has_table]
         print(f"[      ] digital 扫描结果：{len(digital_with_tables)} 页有表格，{len(digital_text_only)} 页纯文本")
     else:
         digital_with_tables = []
         digital_text_only   = []
 
     # ---- Step 3: qwen2.5vl 处理需要 OCR 的页（有表格的 digital + 全部 scanned） ----
-    ocr_pages = list(set(digital_with_tables + scanned_pages))
+    ocr_pages = [] if skip_qwen else list(set(digital_with_tables + scanned_pages))
     ocr_kids_by_page = {}  # {page_num: [elem, ...]}
 
     if ocr_pages:
-        print(f"[Step 3/4] {len(ocr_pages)} 页需要 qwen2.5vl OCR（VRAM 感知队列）...")
+        if skip_qwen:
+            print(f"[Step 3/4] {len(ocr_pages)} 页跳过 qwen2.5vl（skip_qwen=True），全速 Fast 模式")
+        else:
+            print(f"[Step 3/4] {len(ocr_pages)} 页需要 qwen2.5vl OCR（VRAM 感知队列）...")
         _got_vram = False
         _vm = None
         try:
