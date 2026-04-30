@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: 从 opendataloader 输出的 JSON（保留PDF段落+页码）提取页码索引，
       存入 guidance_index.json 的每个文档条目中。
       让 Cortana 回答时能给出「PDF第X页 → markdown第Y行」的精确定位。

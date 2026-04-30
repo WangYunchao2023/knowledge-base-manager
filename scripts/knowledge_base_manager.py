@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-版本: 2.11.0
-功能: 法规指导原则知识库管理器（v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取）
+版本: 2.13.0
+功能: 法规指导原则知识库管理器（v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
+      v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
+      v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
       v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
@@ -26,6 +28,7 @@ import shutil
 import subprocess
 import hashlib
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -599,11 +602,19 @@ def compute_content_hash_from_pages(json_path):
 
 def check_duplicate_by_hash(extracted_json, index_data, current_title=None, current_date=None):
     """
-    基于 PDF 正文第1页 + 第2页的纯文本内容哈希进行去重。
-    两页都与已有文档相同 → 判定为重复。
-    仅第1页相同 → 不视为重复（可能是同一系列文件的封面相同）。
+    基于【标题 + 内容哈希】的综合去重。
+    判定为重复的唯一条件：标题相同 AND 内容哈希（前两页）完全相同。
 
-    【v2.11.0】新增：同名不同日期的版本不判定为重复（标题相同但日期不同 = 不同版本指导原则）。
+    去重逻辑矩阵（v2.13.0）：
+    │ 标题相同 │ 哈希相同 │ 判定         │ 场景                              │
+    │ -------- │ -------- │ ------------ │ -------------------------------- │
+    │ ✅       │ ✅       │ 重复          │ 同一文件的不同格式（.doc/.pdf）   │
+    │ ✅       │ ❌       │ 不重复        │ 不同版本指导原则（征求意见稿→正式版）│
+    │ ❌       │ ✅       │ 不重复        │ 不同文档碰巧用了相同公文模板        │
+    │ ❌       │ ❌       │ 不重复        │ 正常情况                          │
+
+    【v2.13.0】标题过滤作为第一道门槛：标题不同则不进行哈希比对。
+    【v2.11.0】同名不同日期的版本不判定为重复（标题相同但日期不同）。
 
     返回 (is_duplicate, conflicting_doc)
     """
@@ -617,6 +628,11 @@ def check_duplicate_by_hash(extracted_json, index_data, current_title=None, curr
         if not stored or not isinstance(stored, dict):
             continue
 
+        # 【v2.13.0】第一道门槛：标题必须相同，才继续比哈希
+        doc_title = doc.get("title", "")
+        if current_title and doc_title and current_title != doc_title:
+            continue  # 标题不同，直接跳过，不比哈希
+
         p1_match = hashes["page1"] and stored.get("page1") == hashes["page1"]
         p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
 
@@ -625,14 +641,18 @@ def check_duplicate_by_hash(extracted_json, index_data, current_title=None, curr
             doc_date = doc.get("issue_date")
             if current_date and doc_date and current_date != doc_date:
                 continue  # 跳过，继续寻找真正的重复
-            return True, doc  # 两页文本均相同，且日期一致，判定为重复
-    
+            return True, doc  # 标题相同 + 两页文本均相同，判定为重复
+
     # 保底：PDF 字节哈希比对（全扫描文档，无可提取文本时）
     pdf_byte = hashes.get("pdf_byte")
     if pdf_byte:
         for doc in index_data.get("documents", []):
             stored = doc.get("content_hash", {})
             if stored is None or not isinstance(stored, dict):
+                continue
+            # 【v2.13.0】同样先检查标题
+            doc_title = doc.get("title", "")
+            if current_title and doc_title and current_title != doc_title:
                 continue
             if stored.get("pdf_byte") == pdf_byte:
                 # 同样检查日期
@@ -746,34 +766,121 @@ def process_new_file(f, index_data):
 
 # ---- 钩子触发 ----
 
-def trigger_graphify_hook():
+def _get_session_age_seconds(session_key_pattern):
     """
-    立即后台启动 graphify 增量更新（无 cron 轮询）。
-    watchdog 触发 → 索引更新 → 立即后台启动 graphify。
+    从 openclaw sessions JSON 中查找匹配 session_key_pattern 的会话，
+    返回其 ageMs（毫秒）。找不到返回 None。
     """
     try:
-        subprocess.run(
-            ["python3", GRAPHIFY_JOB, "--enqueue"],
-            capture_output=True, timeout=10
+        result = subprocess.run(
+            ["timeout", "5", "openclaw", "sessions", "--json"],
+            capture_output=True, text=True, timeout=8
         )
-    except Exception as e:
-        log(f"graphify 作业入队失败: {e}，继续直接启动", "⚠️")
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        now_ms = datetime.now().timestamp() * 1000
+        for s in data.get("sessions", []):
+            key = s.get("key", "")
+            if session_key_pattern in key:
+                updated = s.get("updatedAt", 0)
+                return (now_ms - updated) / 1000.0
+        return None
+    except Exception:
+        return None
 
-    mode_flag = " --update"
-    cmd = (
-        f"cd {GRAPHIFY_TARGET} && "
-        f"nohup openclaw agent --message "
-        f"'请执行 graphify 图谱增量更新：/graphify {GRAPHIFY_TARGET}{mode_flag}。"
-        f"完成后报告节点数、边数。' "
-        f"--timeout 600 > /tmp/graphify_bg.log 2>&1 &"
-    )
-    try:
-        subprocess.run(["bash", "-c", cmd], timeout=10)
-        log("Graphify 已在后台启动（增量更新）", "🕸️")
-        return True, "后台启动完成"
-    except Exception as e:
-        log(f"Graphify 后台启动失败: {e}", "⚠️")
-        return False, str(e)
+
+def trigger_graphify_hook(mode="rebuild"):
+    """
+    启动 graphify agent 并同步等待其完成。
+    使用独立 session id 追踪进度，轮询 sessions 列表直到 agent 结束。
+    最多等待 20 分钟，超时则放弃（batch 场景仍可继续）。
+
+    v2.12.0: 修复 graphify 钩子从未自动完成的 bug。
+    旧 bug 根因: openclaw agent --message 非阻塞，CLI 立即返回，
+    但 agent 在 gateway 后台异步执行，原来的 nohup 路径无法追踪完成状态。
+    修复：改用固定 session id + 线程轮询 age 直到 agent 结束。
+    """
+    import threading
+
+    # 生成唯一 session label
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    session_label = f"gf-hook-{ts}"
+    marker_file = f"/tmp/graphify_hook_{ts}.done"
+
+    # 构建 prompt（扫描全量知识库，不再只扫"稳定性"子目录）
+    if mode == "rebuild":
+        prompt = (
+            f"请对以下目录执行 graphify 全量重建（扫描全部子目录）：/graphify "
+            f"/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库 "
+            f"--mode deep。"
+            f"完成后请汇报：节点数、边数、社区数。"
+        )
+        timeout_secs = 1200  # 20 分钟
+    else:
+        prompt = (
+            f"请执行 graphify 增量更新（扫描全部子目录）：/graphify "
+            f"/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库 "
+            f"--update。完成后请汇报：节点数、边数。"
+        )
+        timeout_secs = 600  # 10 分钟
+
+    log(f"Graphify 启动（session={session_label}，等待≤{timeout_secs//60}分钟）...", "🕸️")
+
+    # 在后台线程启动 agent（不让 subprocess 阻塞主线程）
+    log_file = f"/tmp/graphify_hook_{ts}.log"
+
+    def run_agent():
+        # nohup 方式：CLI 立即返回，agent 在 gateway 后台运行
+        cmd = [
+            "nohup", "openclaw", "agent",
+            "--session-id", session_label,
+            "--message", prompt,
+            "--timeout", str(timeout_secs - 60),
+        ]
+        with open(log_file, "w") as f:
+            proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+        proc.wait()  # 等待 CLI 返回（不等 agent 完成）
+
+    thread = threading.Thread(target=run_agent, daemon=True)
+    thread.start()
+
+    # 等待 agent 在 gateway 完成：轮询 session 直到它出现且 age 稳定
+    # 策略：session 出现后，等待 age > 30s（说明 agent 已处理完不再更新）
+    POLL_INTERVAL = 30  # 每 30 秒轮询一次
+    MAX_WAIT = timeout_secs
+    start_time = time.time()
+    session_found = False
+    last_age = None
+
+    while time.time() - start_time < MAX_WAIT:
+        time.sleep(POLL_INTERVAL)
+        age = _get_session_age_seconds(session_label)
+        elapsed = time.time() - start_time
+
+        if age is not None:
+            session_found = True
+            if age > 30:
+                # age 超过 30s 不更新，说明 agent 已结束
+                log(f"Graphify 完成（session age={age:.0f}s，耗时约{elapsed:.0f}s）✅", "🕸️")
+                # 写完成标记
+                with open(marker_file, "w") as f:
+                    f.write(f"done\n")
+                return True, f"完成，session age={age:.0f}s"
+            else:
+                log(f"Graphify 运行中（session age={age:.0f}s，elapsed={elapsed:.0f}s）...", "🕸️")
+                last_age = age
+        else:
+            if session_found:
+                # 之前找到过，现在找不到了 → 已结束
+                log(f"Graphify 完成（session 已消失，耗时约{elapsed:.0f}s）✅", "🕸️")
+                with open(marker_file, "w") as f:
+                    f.write("done\n")
+                return True, f"完成，session 已消失"
+
+    # 超时
+    log(f"Graphify 超时（>{MAX_WAIT//60}分钟），请手动检查图谱状态", "⚠️")
+    return False, f"超时（>{MAX_WAIT//60}分钟）"
 
 def trigger_dify_hook():
     log("触发 Dify 数据集更新...", "🔍")

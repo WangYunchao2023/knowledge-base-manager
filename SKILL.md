@@ -1,13 +1,14 @@
 ---
 name: knowledge-base-manager
-version: 2.12.0
+version: 2.13.0
 version_date: 2026-04-30
 description: |
-  v2.12.0: 默认启用 --best-quality，所有入库文档强制 qwen2.5vl 最佳质量提取，不降级，失败即报错，确保知识库信息完整无丢失。
+  v2.13.0: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同日发布的不同文档碰巧封面相同导致的假误判。
+  v2.12.0: graphify 钩子同步等待修复 — 旧版 openclaw agent 立即返回导致钩子失效；改用唯一 session id + 线程轮询 session age，直到 agent 完成（最多20分钟）。
   v2.11.0: 批量入库 skip_qwen 优化 — 数字 PDF 跳过 qwen2.5vl，批量速度提升 40 倍。
   v2.10.0: 修复 check_duplicate_by_hash stored=None 崩溃、每文件保存、--recover 恢复。
   法规指导原则知识库管理与自动同步工具。
-  功能：原始文件归档 → opendataloader内容提取（最佳质量）→ AI自动分类 → 更新索引 → 自动触发 graphify 图谱构建（后台agent执行）
+  功能：原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 自动触发 graphify 图谱构建（后台agent执行）
   触发条件：用户提到"知识库管理"、"更新知识库"、"添加指导原则"、"检查知识库"时使用。
 ---
 

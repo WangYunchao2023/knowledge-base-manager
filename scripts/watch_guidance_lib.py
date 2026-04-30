@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: 法规指导原则知识库 watchdog 监控进程
       监控原始文件目录，自动触发 knowledge_base_manager.py 处理新文件
 

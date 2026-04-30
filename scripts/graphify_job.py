@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: Graphify 作业处理器（供 cron isolated agent 调用）
       负责把作业状态打印出来，由 isolated agent 直接执行 graphify
 

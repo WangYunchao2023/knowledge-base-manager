@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 3.0.0
+版本: 2.8.0
 功能: Graphify 图谱对接模块
       通过 OpenClaw Agent 执行 /graphify skill 流程，构建法规库知识图谱
       支持多分类目录（化学药/中药/生物制品/通用）统一建图
@@ -57,9 +57,10 @@ def get_all_extracted_dirs():
         dirs.append(old)
     return dirs
 
-# 默认 target 用于 /graphify 命令（取第一个分类目录作为入口）
+# 默认 target 用于 /graphify 命令
+# 指向 KB_ROOT 以扫描全部子目录（而非只扫"稳定性"一个子目录）
 ALL_EXTRACTED_DIRS = get_all_extracted_dirs()
-GRAPHIFY_TARGET = ALL_EXTRACTED_DIRS[0] if ALL_EXTRACTED_DIRS else os.path.join(KB_ROOT, "稳定性", "供AI用信息")
+GRAPHIFY_TARGET = KB_ROOT  # 全量扫描
 # ==============================
 
 def log(msg, emoji="🕸️"):
