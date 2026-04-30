@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-版本: 2.10.0
-功能: 法规指导原则知识库管理器（v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复）
+版本: 2.14.0
+功能: 法规指导原则知识库管理器（v2.14.0 新增: 标题相似度三级判断——identical/small/large；small差异常见于（试行）/（征求意见稿）等标注，去括号后相同视同 identical；large 差异即使哈希相同也判定为非重复。v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
+      v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
+      v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
+      v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
 用法:
@@ -25,6 +28,7 @@ import shutil
 import subprocess
 import hashlib
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -235,7 +239,7 @@ def _validate_extraction(extracted_base, output_dir):
     return True, "OK"
 
 
-def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False):
+def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False, best_quality=True):
     """
     调用 opendataloader 提取内容。
 
@@ -244,6 +248,7 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
       - scanned（纯图像）→ qwen2.5vl OCR（skip_qwen=True 时跳过，仅用 Fast）
       - 混合 PDF → 两种方式结合，保留最佳文本
       - skip_qwen=True 时完全跳过 qwen2.5vl，用于批量处理数字 PDF 为主的场景
+      - best_quality=True 时强制所有页走 qwen2.5vl，不降级，失败即报错
 
     DOCX 沿用 subprocess 调用（opendataloader CLI）。
     """
@@ -269,14 +274,20 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
                 output_format="markdown,json",
                 force_qwen=False,
                 skip_server=False,
-                skip_qwen=skip_qwen
+                skip_qwen=skip_qwen,
+                best_quality=best_quality
             )
         except Exception as e:
             return False, f"process_pdf_per_page 异常: {e}"
 
         if not od_result.get("success"):
             mode_used = od_result.get("mode_used", "unknown")
-            return False, f"per-page 提取失败（mode={mode_used}）"
+            err_msg = od_result.get("error", "")
+            ocr_failed = od_result.get("ocr_failed_pages", [])
+            detail = err_msg or f"per-page 提取失败（mode={mode_used}）"
+            if ocr_failed:
+                detail += f"；qwen2.5vl 失败页面: {', '.join(f'第{p}页' for p in ocr_failed)}"
+            return False, detail
 
         # 验证输出文件
         is_valid, err = _validate_extraction(extracted_base, output_dir)
@@ -290,6 +301,8 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
         cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
         if force_mode:
             cmd.extend(["--force-mode", force_mode])
+        if best_quality:
+            cmd.append("--best-quality")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
@@ -334,9 +347,10 @@ def save_index(index_data):
         v_str = str(index_data.get("version", "1.0"))
         if "." in v_str:
             v = float(v_str)
-            index_data["version"] = str(round(v + 0.1, 1))
-        else:
-            index_data["version"] = str(int(v_str) + 1)
+            if v < 10:  # 小版本号（如 1.3, 2.9）
+                index_data["version"] = str(round(v + 0.1, 1))
+            else:  # 大版本号（如 780）
+                index_data["version"] = str(int(v_str) + 1)
     except ValueError:
         index_data["version"] = "1.0"
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
@@ -586,11 +600,101 @@ def compute_content_hash_from_pages(json_path):
     return result
 
 
-def check_duplicate_by_hash(extracted_json, index_data):
+def _strip_title_suffix(title):
     """
-    基于 PDF 正文第1页 + 第2页的纯文本内容哈希进行去重。
-    两页都与已有文档相同 → 判定为重复。
-    仅第1页相同 → 不视为重复（可能是同一系列文件的封面相同）。
+    去除标题中的【后缀级小差异】标注，返回核心标题。
+    这些小差异属于同一文件的不同发布状态，不影响实质性判断：
+    - （试行）/ 【试行】/ [试行]
+    - （征求意见稿）/ 【征求意见稿】/ [征求意见稿]
+    - （修订）/ 【修订】
+    - （第一次修订）
+    - （2007版）/ （2008版）等年份版本标注
+    - （上）/ （下）等分册标注
+    - 以及上述各项的英文括号变体
+    """
+    if not title:
+        return ""
+    import re
+    t = title.strip()
+    # 匹配各种括号包裹的短标注（括号内≤6个字符，或包含"试行"/"征求意见"/"修订"/"版"/"上册"/"下册"等关键词）
+    # 括号的类型：中文（）、【】、英文()、[]
+    patterns = [
+        r'[（\(【\[]([^)）\]\]]{0,8}?(?:试行|征求意见|修订|版|上册|下册|第.{0,4}次)[^)）\]\]]{0,8})[）\)】\]]',
+        r'[（\(【\[]([^)）\]\]]{0,6})[）\)】\]]',  # 通用短标注（≤6字）
+    ]
+    for pat in patterns:
+        t = re.sub(pat, '', t)
+    return t.strip()
+
+
+def _title_similarity_level(t1, t2):
+    """
+    判断两个标题的相似度级别。
+    【v2.14.0】新增标题相似度判断，解决"小差异 + 哈希相同 = 重复"与"大差异 + 哈希相同 = 非重复"的区分。
+
+    返回值：
+    - "identical": 标题完全相同
+    - "small":      小差异（去括号后相同，或仅差一个短标注），哈希相同时视为重复
+    - "large":      大差异（去括号后仍不同），哈希相同时为巧合碰撞，非重复
+    - "none":       无法比较（某一方为空）
+    """
+    if not t1 or not t2:
+        return "none"
+    if t1 == t2:
+        return "identical"
+
+    s1 = _strip_title_suffix(t1)
+    s2 = _strip_title_suffix(t2)
+
+    # 去标注后相同 → 小差异
+    if s1 and s2 and s1 == s2:
+        return "small"
+
+    # 计算编辑距离相似率（不依赖外部库）
+    # 简单实现：最长公共子串比例
+    def lcs_ratio(a, b):
+        # 找到最长公共子串长度（朴素实现，适用于中文）
+        m, n = len(a), len(b)
+        if m == 0 or n == 0:
+            return 0.0
+        # 限制最大长度以避免性能问题（取前100字）
+        a, b = a[:100], b[:100]
+        m, n = len(a), len(b)
+        # 简单的 LCS DP 表
+        dp = [[0] * (n + 1) for _ in range(2)]
+        max_len = 0
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if a[i-1] == b[j-1]:
+                    dp[i % 2][j] = dp[(i-1) % 2][j-1] + 1
+                    max_len = max(max_len, dp[i % 2][j])
+                else:
+                    dp[i % 2][j] = 0
+        return max_len / max(m, n)
+
+    ratio = lcs_ratio(s1, s2)
+    # 若相似率 ≥ 0.75，认为是小的文字差异
+    return "small" if ratio >= 0.75 else "large"
+
+
+def check_duplicate_by_hash(extracted_json, index_data, current_title=None, current_date=None):
+    """
+    基于【标题 + 内容哈希】的综合去重。
+
+    去重逻辑矩阵（v2.14.0 新版）：
+    ┌──────────────────┬─────────────┬────────────┬──────────────────────────────────┐
+    │ 标题关系          │ 哈希相同     │ 判定        │ 场景                              │
+    ├──────────────────┼─────────────┼────────────┼──────────────────────────────────┤
+    │ identical        │ ✅          │ 重复        │ 同一文件的不同格式               │
+    │ small            │ ✅          │ 重复        │ 试行版vs正式版/不同年份版本       │
+    │ large            │ ✅          │ 不重复      │ 大幅不同标题+哈希相同=巧合碰撞    │
+    │ any              │ ❌          │ 不重复      │ 正常                              │
+    └──────────────────┴─────────────┴────────────┴──────────────────────────────────┘
+
+    【v2.14.0】标题关系细分：identical / small / large。
+    - small: 标题去标注后相同（LCS相似率≥75%）
+    - large: 标题差异大，即使哈希相同也视为非重复
+    【v2.13.0】标题过滤作为第一道门槛：标题差异大则不进行哈希比对。
 
     返回 (is_duplicate, conflicting_doc)
     """
@@ -604,12 +708,22 @@ def check_duplicate_by_hash(extracted_json, index_data):
         if not stored or not isinstance(stored, dict):
             continue
 
+        # 【v2.14.0】第一道门槛：标题相似度必须为 identical 或 small，才继续比哈希
+        doc_title = doc.get("title", "")
+        sim = _title_similarity_level(current_title or "", doc_title or "")
+        if sim in ("large", "none"):
+            continue  # 标题差异大或某一方为空，不比哈希（避免哈希碰撞误判）
+
         p1_match = hashes["page1"] and stored.get("page1") == hashes["page1"]
         p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
 
         if p1_match and p2_match:
-            return True, doc  # 两页文本均相同，判定为重复
-    
+            # 【v2.11.0】同名不同日期 → 不视为重复（新版本指导原则）
+            doc_date = doc.get("issue_date")
+            if current_date and doc_date and current_date != doc_date:
+                continue  # 跳过，继续寻找真正的重复
+            return True, doc  # 标题相同 + 两页文本均相同，判定为重复
+
     # 保底：PDF 字节哈希比对（全扫描文档，无可提取文本时）
     pdf_byte = hashes.get("pdf_byte")
     if pdf_byte:
@@ -617,7 +731,16 @@ def check_duplicate_by_hash(extracted_json, index_data):
             stored = doc.get("content_hash", {})
             if stored is None or not isinstance(stored, dict):
                 continue
+            # 【v2.14.0】同样先检查标题相似度
+            doc_title = doc.get("title", "")
+            sim = _title_similarity_level(current_title or "", doc_title or "")
+            if sim in ("large", "none"):
+                continue
             if stored.get("pdf_byte") == pdf_byte:
+                # 同样检查日期
+                doc_date = doc.get("issue_date")
+                if current_date and doc_date and current_date != doc_date:
+                    continue
                 return True, doc  # PDF 字节完全相同，判定为重复
 
     return False, None
@@ -653,19 +776,34 @@ def process_new_file(f, index_data):
     extracted_md = os.path.join(extracted_abs, extracted_base + ".md")
     extracted_json = os.path.join(extracted_abs, extracted_base + ".json")
     
-    if os.path.exists(extracted_md) and os.path.exists(extracted_json):
-        log(f"  → 提取文件已存在，跳过 opendataloader", "⏭")
+    # 【v2.11.0】智能跳过：JSON/MD 存在 且 源文件未更新（mtime）→ 跳过提取
+    json_exists = os.path.exists(extracted_json)
+    md_exists = os.path.exists(extracted_md)
+    source_mtime = os.path.getmtime(raw_dest) if os.path.exists(raw_dest) else 0
+    json_mtime = os.path.getmtime(extracted_json) if json_exists else 0
+    skip_extraction = json_exists and md_exists and (source_mtime <= json_mtime)
+
+    if skip_extraction:
+        log(f"  → 提取文件已存在且源文件未更新，跳过 opendataloader", "⏭")
     else:
-        log(f"  → 调用 opendataloader 提取内容...", "🔄")
-        success, result = run_opendataloader(raw_dest, extracted_abs, skip_qwen=True)
+        if json_exists or md_exists:
+            log(f"  → 重新提取（源文件有更新或部分文件缺失）", "🔄")
+        else:
+            log(f"  → 调用 opendataloader 提取内容...", "🔄")
+        success, result = run_opendataloader(raw_dest, extracted_abs, skip_qwen=False, best_quality=True)
         if success:
             log(f"  → 内容提取完成", "✅")
         else:
             log(f"  → 提取失败: {result}", "⚠️")
     
     # 2.5 内容哈希去重检查（基于 PDF 正文第1+2页纯文本）
+    # 【v2.11.0】新增：传入 current_title 和 current_date，用于过滤同名不同日期的合法版本
     if os.path.exists(extracted_json):
-        is_dup, dup_doc = check_duplicate_by_hash(extracted_json, index_data)
+        is_dup, dup_doc = check_duplicate_by_hash(
+            extracted_json, index_data,
+            current_title=meta.get('title'),
+            current_date=meta.get('issue_date')
+        )
         if is_dup:
             log(f"  ⚠️  内容与已有文档重复，已跳过入库", "🔄")
             print(f"  重复文档: {dup_doc['title']}（{dup_doc.get('issue_date', '无日期')}）")
@@ -710,34 +848,121 @@ def process_new_file(f, index_data):
 
 # ---- 钩子触发 ----
 
-def trigger_graphify_hook():
+def _get_session_age_seconds(session_key_pattern):
     """
-    立即后台启动 graphify 增量更新（无 cron 轮询）。
-    watchdog 触发 → 索引更新 → 立即后台启动 graphify。
+    从 openclaw sessions JSON 中查找匹配 session_key_pattern 的会话，
+    返回其 ageMs（毫秒）。找不到返回 None。
     """
     try:
-        subprocess.run(
-            ["python3", GRAPHIFY_JOB, "--enqueue"],
-            capture_output=True, timeout=10
+        result = subprocess.run(
+            ["timeout", "5", "openclaw", "sessions", "--json"],
+            capture_output=True, text=True, timeout=8
         )
-    except Exception as e:
-        log(f"graphify 作业入队失败: {e}，继续直接启动", "⚠️")
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        now_ms = datetime.now().timestamp() * 1000
+        for s in data.get("sessions", []):
+            key = s.get("key", "")
+            if session_key_pattern in key:
+                updated = s.get("updatedAt", 0)
+                return (now_ms - updated) / 1000.0
+        return None
+    except Exception:
+        return None
 
-    mode_flag = " --update"
-    cmd = (
-        f"cd {GRAPHIFY_TARGET} && "
-        f"nohup openclaw agent --message "
-        f"'请执行 graphify 图谱增量更新：/graphify {GRAPHIFY_TARGET}{mode_flag}。"
-        f"完成后报告节点数、边数。' "
-        f"--timeout 600 > /tmp/graphify_bg.log 2>&1 &"
-    )
-    try:
-        subprocess.run(["bash", "-c", cmd], timeout=10)
-        log("Graphify 已在后台启动（增量更新）", "🕸️")
-        return True, "后台启动完成"
-    except Exception as e:
-        log(f"Graphify 后台启动失败: {e}", "⚠️")
-        return False, str(e)
+
+def trigger_graphify_hook(mode="rebuild"):
+    """
+    启动 graphify agent 并同步等待其完成。
+    使用独立 session id 追踪进度，轮询 sessions 列表直到 agent 结束。
+    最多等待 20 分钟，超时则放弃（batch 场景仍可继续）。
+
+    v2.12.0: 修复 graphify 钩子从未自动完成的 bug。
+    旧 bug 根因: openclaw agent --message 非阻塞，CLI 立即返回，
+    但 agent 在 gateway 后台异步执行，原来的 nohup 路径无法追踪完成状态。
+    修复：改用固定 session id + 线程轮询 age 直到 agent 结束。
+    """
+    import threading
+
+    # 生成唯一 session label
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    session_label = f"gf-hook-{ts}"
+    marker_file = f"/tmp/graphify_hook_{ts}.done"
+
+    # 构建 prompt（扫描全量知识库，不再只扫"稳定性"子目录）
+    if mode == "rebuild":
+        prompt = (
+            f"请对以下目录执行 graphify 全量重建（扫描全部子目录）：/graphify "
+            f"/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库 "
+            f"--mode deep。"
+            f"完成后请汇报：节点数、边数、社区数。"
+        )
+        timeout_secs = 1200  # 20 分钟
+    else:
+        prompt = (
+            f"请执行 graphify 增量更新（扫描全部子目录）：/graphify "
+            f"/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库 "
+            f"--update。完成后请汇报：节点数、边数。"
+        )
+        timeout_secs = 600  # 10 分钟
+
+    log(f"Graphify 启动（session={session_label}，等待≤{timeout_secs//60}分钟）...", "🕸️")
+
+    # 在后台线程启动 agent（不让 subprocess 阻塞主线程）
+    log_file = f"/tmp/graphify_hook_{ts}.log"
+
+    def run_agent():
+        # nohup 方式：CLI 立即返回，agent 在 gateway 后台运行
+        cmd = [
+            "nohup", "openclaw", "agent",
+            "--session-id", session_label,
+            "--message", prompt,
+            "--timeout", str(timeout_secs - 60),
+        ]
+        with open(log_file, "w") as f:
+            proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+        proc.wait()  # 等待 CLI 返回（不等 agent 完成）
+
+    thread = threading.Thread(target=run_agent, daemon=True)
+    thread.start()
+
+    # 等待 agent 在 gateway 完成：轮询 session 直到它出现且 age 稳定
+    # 策略：session 出现后，等待 age > 30s（说明 agent 已处理完不再更新）
+    POLL_INTERVAL = 30  # 每 30 秒轮询一次
+    MAX_WAIT = timeout_secs
+    start_time = time.time()
+    session_found = False
+    last_age = None
+
+    while time.time() - start_time < MAX_WAIT:
+        time.sleep(POLL_INTERVAL)
+        age = _get_session_age_seconds(session_label)
+        elapsed = time.time() - start_time
+
+        if age is not None:
+            session_found = True
+            if age > 30:
+                # age 超过 30s 不更新，说明 agent 已结束
+                log(f"Graphify 完成（session age={age:.0f}s，耗时约{elapsed:.0f}s）✅", "🕸️")
+                # 写完成标记
+                with open(marker_file, "w") as f:
+                    f.write(f"done\n")
+                return True, f"完成，session age={age:.0f}s"
+            else:
+                log(f"Graphify 运行中（session age={age:.0f}s，elapsed={elapsed:.0f}s）...", "🕸️")
+                last_age = age
+        else:
+            if session_found:
+                # 之前找到过，现在找不到了 → 已结束
+                log(f"Graphify 完成（session 已消失，耗时约{elapsed:.0f}s）✅", "🕸️")
+                with open(marker_file, "w") as f:
+                    f.write("done\n")
+                return True, f"完成，session 已消失"
+
+    # 超时
+    log(f"Graphify 超时（>{MAX_WAIT//60}分钟），请手动检查图谱状态", "⚠️")
+    return False, f"超时（>{MAX_WAIT//60}分钟）"
 
 def trigger_dify_hook():
     log("触发 Dify 数据集更新...", "🔍")

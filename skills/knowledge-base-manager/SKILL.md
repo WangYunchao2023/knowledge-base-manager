@@ -1,8 +1,10 @@
 ---
 name: knowledge-base-manager
-version: 2.11.0
-version_date: 2026-04-29
+version: 2.14.0
+version_date: 2026-04-30
 description: |
+  v2.13.0: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同日发布的不同文档碰巧封面相同导致的假误判。
+  v2.12.0: graphify 钩子同步等待修复 — 旧版 openclaw agent 立即返回导致钩子失效；改用唯一 session id + 线程轮询 session age，直到 agent 完成（最多20分钟）。
   v2.11.0: 批量入库 skip_qwen 优化 — 数字 PDF 跳过 qwen2.5vl，批量速度提升 40 倍。
   v2.10.0: 修复 check_duplicate_by_hash stored=None 崩溃、每文件保存、--recover 恢复。
   法规指导原则知识库管理与自动同步工具。
@@ -10,7 +12,7 @@ description: |
   触发条件：用户提到"知识库管理"、"更新知识库"、"添加指导原则"、"检查知识库"时使用。
 ---
 
-# SKILL.md - 法规指导原则知识库管理器 (v2.11.0)
+# SKILL.md - 法规指导原则知识库管理器 (v2.12.0)
 
 > 本 Skill 是「知识、信息层」的核心管理工具，实现知识库的**全自动化闭环维护**。
 > 支持三种入库方式，自动触发 graphify 图谱后台构建。
@@ -231,6 +233,7 @@ python3 dify_integration.py --sync      # 同步所有 .md 到 Dify
 | **v2.8.0** | **2026-04-26** | **与opendataloader-pdf v2.8.0同步：Word真实页码/数字PDF逐页感知/Excel合并单元格/opendataloader升级** |
 | **v3.0.0** | **2026-04-24** | **知识库管理器大版本升级（见commit 256e6f5）** |
 | **v3.1.0** | **2026-04-25** | **内容哈希升级：PDF前两页逐页比对 + 提取失败自动重试** |
+| **v2.12.0** | **2026-04-30** | **默认 --best-quality：所有入库文档强制 qwen2.5vl，不降级，失败即报错，确保知识库信息完整** |
 | **v3.2.0** | **2026-04-25** | **PDF逐页自适应：digital页→opendataloader，scanned页→qwen2.5vl，混合页自动结合** |
 | v2.1.0 | 2026-04-24 | 全自动 graphify 触发：job queue + cron + openclaw agent 后台执行 |
 | v2.0.0 | 2026-04-24 | 去飞书 + graphify/dify 钩子 + watchdog 监控进程 |

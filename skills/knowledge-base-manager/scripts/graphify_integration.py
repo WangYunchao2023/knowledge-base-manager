@@ -57,9 +57,10 @@ def get_all_extracted_dirs():
         dirs.append(old)
     return dirs
 
-# 默认 target 用于 /graphify 命令（取第一个分类目录作为入口）
+# 默认 target 用于 /graphify 命令
+# 指向 KB_ROOT 以扫描全部子目录（而非只扫"稳定性"一个子目录）
 ALL_EXTRACTED_DIRS = get_all_extracted_dirs()
-GRAPHIFY_TARGET = ALL_EXTRACTED_DIRS[0] if ALL_EXTRACTED_DIRS else os.path.join(KB_ROOT, "稳定性", "供AI用信息")
+GRAPHIFY_TARGET = KB_ROOT  # 全量扫描
 # ==============================
 
 def log(msg, emoji="🕸️"):
