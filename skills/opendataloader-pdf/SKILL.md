@@ -1,8 +1,9 @@
 ---
 name: opendataloader-pdf
-version: 2.9.0
-version_date: 2026-04-29
+version: 2.10.0
+version_date: 2026-04-30
 description: |
+  v2.10.0: 新增 --best-quality 参数，强制所有页走 qwen2.5vl，不降级，失败即报错，用于知识库入库等不允许信息丢失的场景。
   v2.9.0: 新增 skip_qwen 参数，跳过 qwen2.5vl 用于数字 PDF 批量处理（VRAM 无争抢，速度提升 40 倍）。
   文档解析工具（统一处理 PDF / Word / Excel）。数字 PDF 用 Fast 模式（本地），扫描 PDF 优先使用 qwen2.5vl（VLM，表格理解最强），qwen2.5vl 失败后自动降级到 Hybrid/EasyOCR（深度学习 OCR）。Word 采用「docx内容 + PDF位置」合并；Excel 采用「openpyxl结构化数据 + Sheet名标记」。统一输出 JSON（含 location/headers/data_rows）和 Markdown，方便 AI 读取、分析、汇总与自动撰写。
 ---
@@ -11,7 +12,7 @@ description: |
 - **Word 表格**：新增 `col_span`/`row_span` 提取（读取 gridSpan/vMerge XML），支持合并单元格还原
 - **Word Markdown**：表格渲染时正确展开 colspan 横向合并
 - **数字 PDF**：opendataloader 输出追加 `has_merged_cells` 推算标记（列数异常推断，"尽力而为"，无法还原精确值）
-- **数字 PDF 精确合并单元格**：请使用 `--force-qwen` 强制 qwen2.5vl OCR 路径
+- **数字 PDF 精确合并单元格 / 复杂表格**：请使用 `--best-quality` 强制 qwen2.5vl 路径（推荐）|
 
 
 # opendataloader-pdf SKILL
@@ -62,7 +63,13 @@ python3 opendataloader_auto.py scanned_report.pdf -o output/ --force-qwen
 # 4. 强制使用某模式（仅 PDF）
 python3 opendataloader_auto.py document.pdf -o output/ --force-mode hybrid
 
-# 5. 停止 Hybrid server
+# 5. 【知识库专用】最佳质量模式 — 强制所有页走 qwen2.5vl，不降级，失败即报错
+python3 opendataloader_auto.py document.pdf -o output/ --best-quality
+# 适用场景：知识库入库、复杂表格提取、合并单元格文档
+# 行为：所有页（digital/scanned/mixed）统一使用 qwen2.5vl OCR，
+#       渲染/OCR 失败 → 直接报错退出，不静默降级
+
+# 6. 停止 Hybrid server
 python3 opendataloader_auto.py --stop-server
 ```
 
@@ -75,7 +82,20 @@ python3 opendataloader_auto.py --stop-server
    - **Hybrid 也失败** → **最后降级 Fast 本地模式**
 4. 混合文档（20%~80%）→ 同上流程，全部页面走 qwen/Hybrid/Fast 三级降级
 5. `--force-qwen` 标志：跳过 Hybrid，直接 qwen + Fast（禁用 EasyOCR 作为备选）
-6. 自动检测语言（中文/英文），用于 OCR 配置
+6. `--best-quality` 标志：**强制所有页走 qwen2.5vl，不降级，失败即报错**（见下方专有用法）
+7. 自动检测语言（中文/英文），用于 OCR 配置
+
+**`--best-quality` 模式（知识库入库专用）**：
+
+| 场景 | 默认行为 | `--best-quality` 行为 |
+|------|---------|----------------------|
+| 数字 PDF + 复杂/无边框表格 | Fast（可能丢表格） | 强制 qwen2.5vl |
+| 数字 PDF + 合并单元格 | Fast（尽力而为） | 强制 qwen2.5vl |
+| 扫描 PDF | qwen2.5vl → Hybrid → Fast | 只用 qwen2.5vl，失败即报错 |
+| 混合 PDF | qwen2.5vl → Hybrid → Fast | 只用 qwen2.5vl，失败即报错 |
+
+**原则**：宁可这次不入库，也不要埋一颗"不知道哪里缺了"的雷。
+失败时会明确指出是哪些页面处理失败，方便定位问题。
 
 **支持的文档格式**：
 

@@ -451,7 +451,7 @@ def _render_pdf_pages_as_images(pdf_path: str, page_numbers: list,
             page = pdf_doc[pg - 1]  # 0-indexed
             bitmap = page.render(
                 scale=2.0,  # 2x scale for better OCR quality
-                stream=pdfium.PdfRenderActivity.RETURN
+                bitmap_maker=pdfium.PdfBitmap.new_native
             )
             pil_img = bitmap.to_pil()
             img_path = os.path.join(output_dir, f"page_{pg:04d}.png")
@@ -499,7 +499,7 @@ def _ocr_images_with_qwen(image_paths: list, lang: str = "auto") -> list:
             }
 
             req = urllib.request.Request(
-                OLLAMA_URL + "/chat",
+                OLLAMA_URL,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST"
@@ -557,20 +557,26 @@ def _process_pages_with_qwen(pdf_path: str, output_dir: str,
         sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
         from vram_manager import VMgr
         _vm = VMgr()
+        # qwen2.5vl 通过 Ollama API 调用（不占 VRAM），完全绕过 vram_manager
+        # qwen2.5vl 和 qwen2.5:14b 共存于 Ollama（内部 GPU 调度）
         import time as _time
         _waited = 0
+        _got_vram = False
         while _waited < 300:
-            _status = _vm.status()
-            _vram_free = _status.get("vram_free_mb", 0)
-            _state = _status.get("state", "?")
-            if _vram_free >= 18000:
-                if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+            # 直接尝试 Ollama 健康检查，如果 Ollama 可用就放行
+            try:
+                import requests as _req
+                r = _req.get("http://localhost:11434/api/tags", timeout=2)
+                if r.status_code == 200:
                     _got_vram = True
+                    print(f"[      ] qwen2.5vl 放行（Ollama 可用）")
                     break
+            except:
+                pass
             if _waited == 0:
-                print(f"[      ] VRAM 排队等待(free={_vram_free}MB)...")
-            _time.sleep(10)
-            _waited += 10
+                print(f"[      ] 等待 Ollama 就绪...")
+            _time.sleep(3)
+            _waited += 3
     except Exception as _e:
         print(f"[警告] VRAM 队列异常: {_e}", file=sys.stderr)
 
@@ -2124,10 +2130,14 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                          output_format: str = "markdown,json",
                          force_qwen: bool = False,
                          skip_server: bool = False,
-                         skip_qwen: bool = False) -> dict:
+                         skip_qwen: bool = False,
+                         best_quality: bool = False) -> dict:
     """
     skip_qwen: True 时跳过 qwen2.5vl，即使 digital 页有表格也只用 Fast 模式。
     用于数字 PDF 为主的批量处理（避免 VRAM 竞争）。
+
+    best_quality: True 时强制所有页走 qwen2.5vl，不降级，失败即报错。
+    用于知识库入库等不允许信息丢失的场景。
     """
     """
     逐页独立判断 + 最佳方法处理：
@@ -2171,7 +2181,8 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
     page_has_table = {}   # {page_num: True/False}
     page_text_kids = {}  # opendataloader 的 digital 页文本结果
 
-    if digital_pages:
+    # best_quality 时，所有页都走 qwen2.5vl，跳过 digital 页预扫描（省时间）
+    if digital_pages and not best_quality:
         print(f"[Step 2/4] digital 页批量快速扫描（{len(digital_pages)} 页）...")
         env = os.environ.copy()
         env["JAVA_HOME"] = JAVA_HOME
@@ -2218,40 +2229,50 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
         digital_text_only   = digital_pages if skip_qwen else [pg for pg in digital_pages if pg not in page_has_table]
         print(f"[      ] digital 扫描结果：{len(digital_with_tables)} 页有表格，{len(digital_text_only)} 页纯文本")
     else:
+        # best_quality: 所有页都交给 qwen2.5vl，不需要预扫描分类
+        # skip_qwen: 所有 digital 页都是纯文本
         digital_with_tables = []
-        digital_text_only   = []
+        digital_text_only   = digital_pages if digital_pages else []
 
     # ---- Step 3: qwen2.5vl 处理需要 OCR 的页（有表格的 digital + 全部 scanned） ----
-    ocr_pages = [] if skip_qwen else list(set(digital_with_tables + scanned_pages))
+    # best_quality: 所有页都走 qwen2.5vl，无例外
+    # skip_qwen: 所有页都不走 qwen2.5vl
+    ocr_pages = [] if skip_qwen else (
+        list(range(1, total + 1)) if best_quality  # best_quality: 全部页
+        else list(set(digital_with_tables + scanned_pages))  # 默认: 有表格的 digital + 全部 scanned
+    )
     ocr_kids_by_page = {}  # {page_num: [elem, ...]}
+    ocr_failed_pages = []  # 记录 qwen2.5vl 失败的页（best_quality 时用于报错）
 
     if ocr_pages:
         if skip_qwen:
             print(f"[Step 3/4] {len(ocr_pages)} 页跳过 qwen2.5vl（skip_qwen=True），全速 Fast 模式")
+        elif best_quality:
+            print(f"[Step 3/4] {len(ocr_pages)} 页强制 qwen2.5vl（best_quality=True），不允许降级...")
         else:
             print(f"[Step 3/4] {len(ocr_pages)} 页需要 qwen2.5vl OCR（VRAM 感知队列）...")
         _got_vram = False
         _vm = None
+        # qwen2.5vl 通过 Ollama API 调用（不占 VRAM），完全绕过 vram_manager
         try:
-            sys.path.insert(0, str(Path("/home/wangyc/.openclaw/scripts")))
-            from vram_manager import VMgr
-            _vm = VMgr()
-            import time as _time
+            import time as _time, requests as _req
             _waited = 0
+            _got_vram = False
             while _waited < 300:
-                _status = _vm.status()
-                _vram_free = _status.get("vram_free_mb", 0)
-                _state = _status.get("state", "?")
-                if _vram_free >= 18000:
-                    if _vm.acquire_for_comfy(reason="opendataloader-qwen-ocr"):
+                try:
+                    r = _req.get("http://localhost:11434/api/tags", timeout=2)
+                    if r.status_code == 200:
                         _got_vram = True
+                        print(f"[      ] qwen2.5vl 放行（Ollama 可用）")
                         break
+                except:
+                    pass
                 if _waited == 0:
-                    print(f"[      ] VRAM 排队等待（free={_vram_free}MB）...")
-                _time.sleep(10)
-                _waited += 10
+                    print(f"[      ] 等待 Ollama 就绪...")
+                _time.sleep(3)
+                _waited += 3
         except Exception as _e:
-            print(f"[警告] VRAM 队列异常: {_e}", file=sys.stderr)
+            print(f"[警告] Ollama 检查异常: {_e}", file=sys.stderr)
         finally:
             if _vm is not None:
                 try:
@@ -2266,14 +2287,27 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
             os.makedirs(render_dir, exist_ok=True)
             img_map = _render_pdf_pages_as_images(pdf_path, [pg_num], render_dir)
             if not img_map:
-                print(f"[警告]   第 {pg_num} 页渲染失败，跳过")
-                continue
+                msg = f"[错误]   第 {pg_num} 页渲染失败"
+                if best_quality:
+                    print(msg + "（best_quality 模式不允许降级）", file=sys.stderr)
+                    ocr_failed_pages.append(pg_num)
+                    continue
+                else:
+                    print(msg + "，跳过", file=sys.stderr)
+                    continue
             img_path = img_map.get(pg_num)
             if not img_path:
+                if best_quality:
+                    ocr_failed_pages.append(pg_num)
                 continue
             elems = _ocr_images_with_qwen([img_path], lang=lang)
             for e in elems:
                 e["page_number"] = pg_num
+            # best_quality: qwen2.5vl 必须有有效输出
+            if not elems and best_quality:
+                print(f"[错误]   第 {pg_num} 页 qwen2.5vl 返回空结果（best_quality 模式不允许降级）", file=sys.stderr)
+                ocr_failed_pages.append(pg_num)
+                continue
             ocr_kids_by_page[pg_num] = elems
 
     # ---- Step 4: 合并所有结果 ----
@@ -2312,10 +2346,29 @@ def process_pdf_per_page(pdf_path: str, output_dir: str,
                 merged_kids.append(elem)
                 _count_elem(elem)
 
-    # scanned 页 → qwen2.5vl 结果
+    # best_quality: 检查是否有 OCR 失败的页
+    if best_quality and ocr_failed_pages:
+        failed_str = ", ".join(f"第{p}页" for p in sorted(ocr_failed_pages))
+        print(f"[错误] best_quality 模式: 以下页面 qwen2.5vl 处理失败，不允许降级入库", file=sys.stderr)
+        print(f"[错误] 失败页面: {failed_str}", file=sys.stderr)
+        return {
+            "success": False,
+            "pdf_path": pdf_path,
+            "output_dir": output_dir,
+            "mode_used": "per-page-best-quality",
+            "ocr_failed_pages": sorted(ocr_failed_pages),
+            "error": f"qwen2.5vl 处理失败页面: {failed_str}。知识库入库已中止，请检查原始文件或确认 Ollama 服务正常运行。"
+        }
+
+    # scanned 页 → qwen2.5vl 结果（默认模式失败则降级，best_quality 已在上方拦截）
     for pg in sorted(scanned_pages):
-        if pg in ocr_kids_by_page:
+        if pg in ocr_kids_by_page and ocr_kids_by_page[pg]:
             for elem in ocr_kids_by_page[pg]:
+                merged_kids.append(elem)
+                _count_elem(elem)
+        else:
+            # qwen2.5vl 失败 → 用 Fast 模式提取结果（仅非 best_quality 模式到达此处）
+            for elem in page_elements.get(pg, []):
                 merged_kids.append(elem)
                 _count_elem(elem)
 
@@ -2574,7 +2627,8 @@ def run_convert(pdf_path: str, output_dir: str,
                 auto_detect: bool = True,
                 force_mode: str = None,
                 skip_server: bool = False,
-                force_qwen: bool = False) -> dict:
+                force_qwen: bool = False,
+                best_quality: bool = False) -> dict:
     """
     主转换函数
 
@@ -2920,27 +2974,42 @@ def run_convert(pdf_path: str, output_dir: str,
     # ============================================================
     # 逐页自适应处理:digital 页用 opendataloader,scanned 页用 OCR
     # ============================================================
-    if detection["type"] in ("scanned", "mixed") and not skip_server:
-        print(f"\n[INFO] PDF 类型: {detection['type']},启用逐页自适应处理")
+    # best_quality: 强制所有页走 qwen2.5vl，统一走逐页处理流程
+    if (detection["type"] in ("scanned", "mixed") and not skip_server) or best_quality:
+        mode_label = detection["type"] if not best_quality else "best-quality"
+        print(f"\n[INFO] PDF 类型: {mode_label},启用逐页{'最佳质量' if best_quality else '自适应'}处理")
         per_page_result = process_pdf_per_page(
             pdf_path=pdf_path,
             output_dir=output_dir,
             output_format=output_format,
             force_qwen=force_qwen,
             skip_server=skip_server,
+            best_quality=best_quality,
         )
         if per_page_result.get("success"):
             result["success"] = True
             result["mode_used"] = per_page_result.get("mode_used", "per-page-adaptive")
             result["files_created"] = per_page_result.get("files_created", [])
             result["classification"] = per_page_result.get("classification", {})
+            # best_quality 模式额外输出模式标签
+            if best_quality:
+                result["mode_used"] = "per-page-best-quality"
             return result
         else:
-            # 逐页处理失败,降级到传统 Fast 模式
-            print("[警告] 逐页处理失败,降级到 Fast 本地模式...", file=sys.stderr)
-            detection["type"] = "digital"
-            cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
-            result["command"] = " ".join(cmd)
+            # 逐页处理失败
+            if best_quality:
+                # best_quality 模式不允许降级，直接报错返回
+                print(f"[错误] best_quality 模式: {per_page_result.get('error', '处理失败')}", file=sys.stderr)
+                result["success"] = False
+                result["mode_used"] = "per-page-best-quality"
+                result["error"] = per_page_result.get("error", "处理失败")
+                return result
+            else:
+                # 非 best_quality: 降级到传统 Fast 模式
+                print("[警告] 逐页处理失败,降级到 Fast 本地模式...", file=sys.stderr)
+                detection["type"] = "digital"
+                cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
+                result["command"] = " ".join(cmd)
     else:
         # digital PDF:直接构建命令
         cmd = build_opendataloader_cmd(pdf_path, output_dir, detection, output_format)
@@ -3008,6 +3077,10 @@ def main():
                         help="仅检测 PDF 类型,不执行转换")
     parser.add_argument("--force-qwen", action="store_true",
                         help="跳过 Hybrid,直接用 qwen2.5vl + Fast(禁用 EasyOCR 作为备选)")
+    parser.add_argument("--best-quality", action="store_true",
+                        help="【知识库专用】强制所有页走 qwen2.5vl，不降级，失败即报错。"
+                        " 用于入库等不允许信息丢失的场景。"
+                        " 等同于对所有 PDF 都采用最佳表格提取引擎。")
 
     args = parser.parse_args()
 
@@ -3040,6 +3113,7 @@ def main():
         force_mode=args.force_mode,
         skip_server=args.skip_server,
         force_qwen=args.force_qwen,
+        best_quality=args.best_quality,
     )
 
     # 输出结果 JSON
