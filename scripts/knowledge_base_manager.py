@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-版本: 2.10.0
-功能: 法规指导原则知识库管理器（v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复）
+版本: 2.11.0
+功能: 法规指导原则知识库管理器（v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取）
+      v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复
       原始文件归档 → opendataloader内容提取 → AI自动分类 → 更新索引 → 触发 graphify 钩子
 
 用法:
@@ -235,7 +236,7 @@ def _validate_extraction(extracted_base, output_dir):
     return True, "OK"
 
 
-def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False):
+def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False, best_quality=True):
     """
     调用 opendataloader 提取内容。
 
@@ -244,6 +245,7 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
       - scanned（纯图像）→ qwen2.5vl OCR（skip_qwen=True 时跳过，仅用 Fast）
       - 混合 PDF → 两种方式结合，保留最佳文本
       - skip_qwen=True 时完全跳过 qwen2.5vl，用于批量处理数字 PDF 为主的场景
+      - best_quality=True 时强制所有页走 qwen2.5vl，不降级，失败即报错
 
     DOCX 沿用 subprocess 调用（opendataloader CLI）。
     """
@@ -269,14 +271,20 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
                 output_format="markdown,json",
                 force_qwen=False,
                 skip_server=False,
-                skip_qwen=skip_qwen
+                skip_qwen=skip_qwen,
+                best_quality=best_quality
             )
         except Exception as e:
             return False, f"process_pdf_per_page 异常: {e}"
 
         if not od_result.get("success"):
             mode_used = od_result.get("mode_used", "unknown")
-            return False, f"per-page 提取失败（mode={mode_used}）"
+            err_msg = od_result.get("error", "")
+            ocr_failed = od_result.get("ocr_failed_pages", [])
+            detail = err_msg or f"per-page 提取失败（mode={mode_used}）"
+            if ocr_failed:
+                detail += f"；qwen2.5vl 失败页面: {', '.join(f'第{p}页' for p in ocr_failed)}"
+            return False, detail
 
         # 验证输出文件
         is_valid, err = _validate_extraction(extracted_base, output_dir)
@@ -290,6 +298,8 @@ def run_opendataloader(input_file, output_dir, force_mode=None, skip_qwen=False)
         cmd = ["python3", OPENDATALOADER_SCRIPT, input_file, "-o", output_dir]
         if force_mode:
             cmd.extend(["--force-mode", force_mode])
+        if best_quality:
+            cmd.append("--best-quality")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
@@ -334,9 +344,10 @@ def save_index(index_data):
         v_str = str(index_data.get("version", "1.0"))
         if "." in v_str:
             v = float(v_str)
-            index_data["version"] = str(round(v + 0.1, 1))
-        else:
-            index_data["version"] = str(int(v_str) + 1)
+            if v < 10:  # 小版本号（如 1.3, 2.9）
+                index_data["version"] = str(round(v + 0.1, 1))
+            else:  # 大版本号（如 780）
+                index_data["version"] = str(int(v_str) + 1)
     except ValueError:
         index_data["version"] = "1.0"
     with open(INDEX_FILE, "w", encoding="utf-8") as f:
@@ -586,11 +597,13 @@ def compute_content_hash_from_pages(json_path):
     return result
 
 
-def check_duplicate_by_hash(extracted_json, index_data):
+def check_duplicate_by_hash(extracted_json, index_data, current_title=None, current_date=None):
     """
     基于 PDF 正文第1页 + 第2页的纯文本内容哈希进行去重。
     两页都与已有文档相同 → 判定为重复。
     仅第1页相同 → 不视为重复（可能是同一系列文件的封面相同）。
+
+    【v2.11.0】新增：同名不同日期的版本不判定为重复（标题相同但日期不同 = 不同版本指导原则）。
 
     返回 (is_duplicate, conflicting_doc)
     """
@@ -608,7 +621,11 @@ def check_duplicate_by_hash(extracted_json, index_data):
         p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
 
         if p1_match and p2_match:
-            return True, doc  # 两页文本均相同，判定为重复
+            # 【v2.11.0】同名不同日期 → 不视为重复（新版本指导原则）
+            doc_date = doc.get("issue_date")
+            if current_date and doc_date and current_date != doc_date:
+                continue  # 跳过，继续寻找真正的重复
+            return True, doc  # 两页文本均相同，且日期一致，判定为重复
     
     # 保底：PDF 字节哈希比对（全扫描文档，无可提取文本时）
     pdf_byte = hashes.get("pdf_byte")
@@ -618,6 +635,10 @@ def check_duplicate_by_hash(extracted_json, index_data):
             if stored is None or not isinstance(stored, dict):
                 continue
             if stored.get("pdf_byte") == pdf_byte:
+                # 同样检查日期
+                doc_date = doc.get("issue_date")
+                if current_date and doc_date and current_date != doc_date:
+                    continue
                 return True, doc  # PDF 字节完全相同，判定为重复
 
     return False, None
@@ -653,19 +674,34 @@ def process_new_file(f, index_data):
     extracted_md = os.path.join(extracted_abs, extracted_base + ".md")
     extracted_json = os.path.join(extracted_abs, extracted_base + ".json")
     
-    if os.path.exists(extracted_md) and os.path.exists(extracted_json):
-        log(f"  → 提取文件已存在，跳过 opendataloader", "⏭")
+    # 【v2.11.0】智能跳过：JSON/MD 存在 且 源文件未更新（mtime）→ 跳过提取
+    json_exists = os.path.exists(extracted_json)
+    md_exists = os.path.exists(extracted_md)
+    source_mtime = os.path.getmtime(raw_dest) if os.path.exists(raw_dest) else 0
+    json_mtime = os.path.getmtime(extracted_json) if json_exists else 0
+    skip_extraction = json_exists and md_exists and (source_mtime <= json_mtime)
+
+    if skip_extraction:
+        log(f"  → 提取文件已存在且源文件未更新，跳过 opendataloader", "⏭")
     else:
-        log(f"  → 调用 opendataloader 提取内容...", "🔄")
-        success, result = run_opendataloader(raw_dest, extracted_abs, skip_qwen=True)
+        if json_exists or md_exists:
+            log(f"  → 重新提取（源文件有更新或部分文件缺失）", "🔄")
+        else:
+            log(f"  → 调用 opendataloader 提取内容...", "🔄")
+        success, result = run_opendataloader(raw_dest, extracted_abs, skip_qwen=False, best_quality=True)
         if success:
             log(f"  → 内容提取完成", "✅")
         else:
             log(f"  → 提取失败: {result}", "⚠️")
     
     # 2.5 内容哈希去重检查（基于 PDF 正文第1+2页纯文本）
+    # 【v2.11.0】新增：传入 current_title 和 current_date，用于过滤同名不同日期的合法版本
     if os.path.exists(extracted_json):
-        is_dup, dup_doc = check_duplicate_by_hash(extracted_json, index_data)
+        is_dup, dup_doc = check_duplicate_by_hash(
+            extracted_json, index_data,
+            current_title=meta.get('title'),
+            current_date=meta.get('issue_date')
+        )
         if is_dup:
             log(f"  ⚠️  内容与已有文档重复，已跳过入库", "🔄")
             print(f"  重复文档: {dup_doc['title']}（{dup_doc.get('issue_date', '无日期')}）")
