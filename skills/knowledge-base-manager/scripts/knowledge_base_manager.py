@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 2.15.0
+版本: 2.16.0
 功能: 法规指导原则知识库管理器（v2.14.0 新增: 标题相似度三级判断——identical/small/large；small差异常见于（试行）/（征求意见稿）等标注，去括号后相同视同 identical；large 差异即使哈希相同也判定为非重复。v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
       v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
       v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
@@ -1182,13 +1182,131 @@ def main():
     
     print_report(new_files, index_data, processed, hook_results)
 
-if __name__ == "__main__":
-    main()
+def _text_to_bigrams(text):
+    """将文本转为 bigram 集合，用于快速相似度计算（中英文通用）。"""
+    text = text.lower()
+    chars = []
+    for c in text:
+        if '\u4e00' <= c <= '\u9fff' or c.isalnum():
+            chars.append(c)
+    text = ''.join(chars)
+    bigrams = set()
+    for i in range(len(text) - 1):
+        bigrams.add(text[i:i+2])
+    return bigrams
+
+
+def search_guidance_fulltext(query, top_k=10, scope=None, doc_type=None,
+                               max_chars=300, json_base=None):
+    """
+    正文全文检索——在所有指导原则文档的正文中搜索关键词。
+
+    【原理】n-gram 二元组（bigram）倒排索引：查询 query 和每个段落都转为 bigram 集合，
+    用交集大小 / 查询 bigram 数得出相关度评分。不依赖外部搜索引擎，Python 原生实现。
+
+    【参数】
+    - query: str          搜索关键词/短语
+    - top_k: int          返回最相关的 top_k 个段落（默认10）
+    - scope: str          按分类过滤（化学药/中药/通用）
+    - doc_type: str       按文档类型过滤（main/feedback/explanation/draft）
+    - max_chars: int      摘要最大字符数（默认300）
+    - json_base: str      知识库根目录（默认自动推断）
+
+    【返回】list[dict]，每条包含: doc_title, issue_date, scope, page_number, snippet, relevance
+
+    【调用示例】
+      results = search_guidance_fulltext("生物等效性")
+      results = search_guidance_fulltext("临床试验方案", top_k=5, scope="化学药")
+    """
+    import json, os, glob
+
+    if json_base is None:
+        json_base = os.environ.get("GUIDANCE_KB_ROOT",
+            "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库")
+
+    # 加载索引（用于 scope/doc_type 过滤和元数据）
+    idx_path = os.path.join(json_base, "guidance_index.json")
+    with open(idx_path, encoding="utf-8") as f:
+        idx = json.load(f)
+
+    # 预过滤文档列表
+    docs_filtered = []
+    for d in idx["documents"]:
+        if scope:
+            cat = d.get("scope", {})
+            cat = cat.get("category", "") if isinstance(cat, dict) else ""
+            if scope not in cat:
+                continue
+        if doc_type:
+            if d.get("doc_type") != doc_type:
+                continue
+        docs_filtered.append(d)
+
+    # 收集所有 doc json 路径
+    doc_json_paths = {}
+    for d in docs_filtered:
+        paths = d.get("paths", {})
+        if isinstance(paths, dict) and paths.get("json"):
+            rel = paths["json"]
+            full = os.path.join(json_base, rel)
+            if os.path.exists(full):
+                doc_json_paths[full] = d
+
+    # Bigram 查询
+    q_bigrams = _text_to_bigrams(query)
+    if not q_bigrams:
+        return []
+
+    all_snippets = []
+    q_len = len(q_bigrams)
+
+    for json_path, doc_meta in doc_json_paths.items():
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                doc = json.load(f)
+        except Exception:
+            continue
+
+        doc_title = doc_meta.get("title", "")
+        issue_date = doc_meta.get("issue_date", "")
+        doc_scope = doc_meta.get("scope", {})
+        doc_scope = doc_scope.get("category", "") if isinstance(doc_scope, dict) else ""
+        doc_type_val = doc_meta.get("doc_type", "")
+        kids = doc.get("kids", [])
+
+        for kid in kids:
+            content = kid.get("content", "").strip()
+            if not content:
+                continue
+
+            tb = _text_to_bigrams(content)
+            intersection = q_bigrams & tb
+            if not intersection:
+                continue
+
+            relevance = len(intersection) / q_len
+
+            # 截取相关段落（保留上下文）
+            snippet = content[:max_chars] + ("…" if len(content) > max_chars else "")
+
+            all_snippets.append({
+                "doc_title": doc_title,
+                "issue_date": issue_date,
+                "scope": doc_scope,
+                "doc_type": doc_type_val,
+                "page_number": kid.get("page number"),
+                "snippet": snippet,
+                "relevance": round(relevance, 3),
+            })
+
+    # 排序
+    all_snippets.sort(key=lambda x: x["relevance"], reverse=True)
+    return all_snippets[:top_k]
 
 
 def query_guidance(query, top_k=5, scope=None, doc_type=None):
     """
-    查询指导原则知识库，返回最相关的文档。
+    查询指导原则知识库（索引元数据级），返回最相关的文档。
 
     【功能】
     - 标题关键词精确匹配 + 模糊搜索
