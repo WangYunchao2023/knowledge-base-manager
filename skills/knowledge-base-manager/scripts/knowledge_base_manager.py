@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 2.14.0
+版本: 2.15.0
 功能: 法规指导原则知识库管理器（v2.14.0 新增: 标题相似度三级判断——identical/small/large；small差异常见于（试行）/（征求意见稿）等标注，去括号后相同视同 identical；large 差异即使哈希相同也判定为非重复。v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
       v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
       v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
@@ -1184,3 +1184,91 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def query_guidance(query, top_k=5, scope=None, doc_type=None):
+    """
+    查询指导原则知识库，返回最相关的文档。
+
+    【功能】
+    - 标题关键词精确匹配 + 模糊搜索
+    - 按相关度排序返回 top_k 条
+    - 支持分类和文档类型过滤
+
+    【参数】
+    - query: str         搜索关键词（如"生物等效性"）
+    - top_k: int         返回条数（默认5）
+    - scope: str         按分类过滤（如"化学药"、"中药"、"通用"）
+    - doc_type: str      按文档类型过滤（main/feedback/explanation/draft）
+
+    【返回】
+    list[dict]，每条包含: id, title, issue_date, status, scope, doc_type, tags, paths(json路径)
+
+    【调用示例】
+      results = query_guidance("生物等效性")
+      results = query_guidance("临床试验", top_k=3, scope="化学药")
+    """
+    import json, os, re
+
+    INDEX_FILE = os.environ.get("GUIDANCE_INDEX",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                     "Documents", "工作", "0 库", "法规指导原则规定知识库", "guidance_index.json"))
+    # 兼容本地 workspace 路径
+    if not os.path.exists(INDEX_FILE):
+        INDEX_FILE = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/guidance_index.json"
+
+    with open(INDEX_FILE, encoding="utf-8") as f:
+        idx = json.load(f)
+
+    docs = idx.get("documents", [])
+    q = query.strip().lower()
+
+    # 简单评分：标题完全包含query=3分，tags包含=2分，source_subdir包含=1分
+    scored = []
+    for d in docs:
+        # 过滤
+        if scope:
+            d_scope = d.get("scope", {})
+            cat = d_scope.get("category", "") if isinstance(d_scope, dict) else ""
+            if scope not in cat:
+                continue
+        if doc_type:
+            if d.get("doc_type") != doc_type:
+                continue
+
+        score = 0
+        title = d.get("title", "").lower()
+        tags = d.get("tags", [])
+        subdir = d.get("source_subdir", "").lower()
+
+        if q in title:
+            score += 3
+            # 标题开头匹配额外+1
+            if title.startswith(q):
+                score += 1
+        for tag in tags:
+            if q in str(tag).lower():
+                score += 2
+        if q in subdir:
+            score += 1
+
+        if score > 0:
+            paths = d.get("paths", {})
+            json_path = paths.get("json", "") if isinstance(paths, dict) else ""
+            scored.append({
+                "id": d.get("id"),
+                "title": d.get("title"),
+                "issue_date": d.get("issue_date"),
+                "status": d.get("status"),
+                "doc_type": d.get("doc_type"),
+                "scope": d.get("scope", {}).get("category") if isinstance(d.get("scope"), dict) else "",
+                "tags": d.get("tags", []),
+                "json_path": json_path,
+                "_score": score,
+            })
+
+    # 排序返回
+    scored.sort(key=lambda x: x["_score"], reverse=True)
+    for item in scored[:top_k]:
+        item.pop("_score", None)
+    return scored[:top_k]
