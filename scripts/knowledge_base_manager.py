@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-版本: 2.13.0
-功能: 法规指导原则知识库管理器（v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
+版本: 2.16.0
+功能: 法规指导原则知识库管理器（v2.14.0 新增: 标题相似度三级判断——identical/small/large；small差异常见于（试行）/（征求意见稿）等标注，去括号后相同视同 identical；large 差异即使哈希相同也判定为非重复。v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
       v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
       v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
       v2.10.0 新增磁盘恢复 + 每文件保存 + 崩溃恢复
@@ -600,21 +600,101 @@ def compute_content_hash_from_pages(json_path):
     return result
 
 
+def _strip_title_suffix(title):
+    """
+    去除标题中的【后缀级小差异】标注，返回核心标题。
+    这些小差异属于同一文件的不同发布状态，不影响实质性判断：
+    - （试行）/ 【试行】/ [试行]
+    - （征求意见稿）/ 【征求意见稿】/ [征求意见稿]
+    - （修订）/ 【修订】
+    - （第一次修订）
+    - （2007版）/ （2008版）等年份版本标注
+    - （上）/ （下）等分册标注
+    - 以及上述各项的英文括号变体
+    """
+    if not title:
+        return ""
+    import re
+    t = title.strip()
+    # 匹配各种括号包裹的短标注（括号内≤6个字符，或包含"试行"/"征求意见"/"修订"/"版"/"上册"/"下册"等关键词）
+    # 括号的类型：中文（）、【】、英文()、[]
+    patterns = [
+        r'[（\(【\[]([^)）\]\]]{0,8}?(?:试行|征求意见|修订|版|上册|下册|第.{0,4}次)[^)）\]\]]{0,8})[）\)】\]]',
+        r'[（\(【\[]([^)）\]\]]{0,6})[）\)】\]]',  # 通用短标注（≤6字）
+    ]
+    for pat in patterns:
+        t = re.sub(pat, '', t)
+    return t.strip()
+
+
+def _title_similarity_level(t1, t2):
+    """
+    判断两个标题的相似度级别。
+    【v2.14.0】新增标题相似度判断，解决"小差异 + 哈希相同 = 重复"与"大差异 + 哈希相同 = 非重复"的区分。
+
+    返回值：
+    - "identical": 标题完全相同
+    - "small":      小差异（去括号后相同，或仅差一个短标注），哈希相同时视为重复
+    - "large":      大差异（去括号后仍不同），哈希相同时为巧合碰撞，非重复
+    - "none":       无法比较（某一方为空）
+    """
+    if not t1 or not t2:
+        return "none"
+    if t1 == t2:
+        return "identical"
+
+    s1 = _strip_title_suffix(t1)
+    s2 = _strip_title_suffix(t2)
+
+    # 去标注后相同 → 小差异
+    if s1 and s2 and s1 == s2:
+        return "small"
+
+    # 计算编辑距离相似率（不依赖外部库）
+    # 简单实现：最长公共子串比例
+    def lcs_ratio(a, b):
+        # 找到最长公共子串长度（朴素实现，适用于中文）
+        m, n = len(a), len(b)
+        if m == 0 or n == 0:
+            return 0.0
+        # 限制最大长度以避免性能问题（取前100字）
+        a, b = a[:100], b[:100]
+        m, n = len(a), len(b)
+        # 简单的 LCS DP 表
+        dp = [[0] * (n + 1) for _ in range(2)]
+        max_len = 0
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if a[i-1] == b[j-1]:
+                    dp[i % 2][j] = dp[(i-1) % 2][j-1] + 1
+                    max_len = max(max_len, dp[i % 2][j])
+                else:
+                    dp[i % 2][j] = 0
+        return max_len / max(m, n)
+
+    ratio = lcs_ratio(s1, s2)
+    # 若相似率 ≥ 0.75，认为是小的文字差异
+    return "small" if ratio >= 0.75 else "large"
+
+
 def check_duplicate_by_hash(extracted_json, index_data, current_title=None, current_date=None):
     """
     基于【标题 + 内容哈希】的综合去重。
-    判定为重复的唯一条件：标题相同 AND 内容哈希（前两页）完全相同。
 
-    去重逻辑矩阵（v2.13.0）：
-    │ 标题相同 │ 哈希相同 │ 判定         │ 场景                              │
-    │ -------- │ -------- │ ------------ │ -------------------------------- │
-    │ ✅       │ ✅       │ 重复          │ 同一文件的不同格式（.doc/.pdf）   │
-    │ ✅       │ ❌       │ 不重复        │ 不同版本指导原则（征求意见稿→正式版）│
-    │ ❌       │ ✅       │ 不重复        │ 不同文档碰巧用了相同公文模板        │
-    │ ❌       │ ❌       │ 不重复        │ 正常情况                          │
+    去重逻辑矩阵（v2.14.0 新版）：
+    ┌──────────────────┬─────────────┬────────────┬──────────────────────────────────┐
+    │ 标题关系          │ 哈希相同     │ 判定        │ 场景                              │
+    ├──────────────────┼─────────────┼────────────┼──────────────────────────────────┤
+    │ identical        │ ✅          │ 重复        │ 同一文件的不同格式               │
+    │ small            │ ✅          │ 重复        │ 试行版vs正式版/不同年份版本       │
+    │ large            │ ✅          │ 不重复      │ 大幅不同标题+哈希相同=巧合碰撞    │
+    │ any              │ ❌          │ 不重复      │ 正常                              │
+    └──────────────────┴─────────────┴────────────┴──────────────────────────────────┘
 
-    【v2.13.0】标题过滤作为第一道门槛：标题不同则不进行哈希比对。
-    【v2.11.0】同名不同日期的版本不判定为重复（标题相同但日期不同）。
+    【v2.14.0】标题关系细分：identical / small / large。
+    - small: 标题去标注后相同（LCS相似率≥75%）
+    - large: 标题差异大，即使哈希相同也视为非重复
+    【v2.13.0】标题过滤作为第一道门槛：标题差异大则不进行哈希比对。
 
     返回 (is_duplicate, conflicting_doc)
     """
@@ -628,10 +708,11 @@ def check_duplicate_by_hash(extracted_json, index_data, current_title=None, curr
         if not stored or not isinstance(stored, dict):
             continue
 
-        # 【v2.13.0】第一道门槛：标题必须相同，才继续比哈希
+        # 【v2.14.0】第一道门槛：标题相似度必须为 identical 或 small，才继续比哈希
         doc_title = doc.get("title", "")
-        if current_title and doc_title and current_title != doc_title:
-            continue  # 标题不同，直接跳过，不比哈希
+        sim = _title_similarity_level(current_title or "", doc_title or "")
+        if sim in ("large", "none"):
+            continue  # 标题差异大或某一方为空，不比哈希（避免哈希碰撞误判）
 
         p1_match = hashes["page1"] and stored.get("page1") == hashes["page1"]
         p2_match = hashes["page2"] and stored.get("page2") == hashes["page2"]
@@ -650,9 +731,10 @@ def check_duplicate_by_hash(extracted_json, index_data, current_title=None, curr
             stored = doc.get("content_hash", {})
             if stored is None or not isinstance(stored, dict):
                 continue
-            # 【v2.13.0】同样先检查标题
+            # 【v2.14.0】同样先检查标题相似度
             doc_title = doc.get("title", "")
-            if current_title and doc_title and current_title != doc_title:
+            sim = _title_similarity_level(current_title or "", doc_title or "")
+            if sim in ("large", "none"):
                 continue
             if stored.get("pdf_byte") == pdf_byte:
                 # 同样检查日期
@@ -1100,5 +1182,211 @@ def main():
     
     print_report(new_files, index_data, processed, hook_results)
 
-if __name__ == "__main__":
-    main()
+def _text_to_bigrams(text):
+    """将文本转为 bigram 集合，用于快速相似度计算（中英文通用）。"""
+    text = text.lower()
+    chars = []
+    for c in text:
+        if '\u4e00' <= c <= '\u9fff' or c.isalnum():
+            chars.append(c)
+    text = ''.join(chars)
+    bigrams = set()
+    for i in range(len(text) - 1):
+        bigrams.add(text[i:i+2])
+    return bigrams
+
+
+def search_guidance_fulltext(query, top_k=10, scope=None, doc_type=None,
+                               max_chars=300, json_base=None):
+    """
+    正文全文检索——在所有指导原则文档的正文中搜索关键词。
+
+    【原理】n-gram 二元组（bigram）倒排索引：查询 query 和每个段落都转为 bigram 集合，
+    用交集大小 / 查询 bigram 数得出相关度评分。不依赖外部搜索引擎，Python 原生实现。
+
+    【参数】
+    - query: str          搜索关键词/短语
+    - top_k: int          返回最相关的 top_k 个段落（默认10）
+    - scope: str          按分类过滤（化学药/中药/通用）
+    - doc_type: str       按文档类型过滤（main/feedback/explanation/draft）
+    - max_chars: int      摘要最大字符数（默认300）
+    - json_base: str      知识库根目录（默认自动推断）
+
+    【返回】list[dict]，每条包含: doc_title, issue_date, scope, page_number, snippet, relevance
+
+    【调用示例】
+      results = search_guidance_fulltext("生物等效性")
+      results = search_guidance_fulltext("临床试验方案", top_k=5, scope="化学药")
+    """
+    import json, os, glob
+
+    if json_base is None:
+        json_base = os.environ.get("GUIDANCE_KB_ROOT",
+            "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库")
+
+    # 加载索引（用于 scope/doc_type 过滤和元数据）
+    idx_path = os.path.join(json_base, "guidance_index.json")
+    with open(idx_path, encoding="utf-8") as f:
+        idx = json.load(f)
+
+    # 预过滤文档列表
+    docs_filtered = []
+    for d in idx["documents"]:
+        if scope:
+            cat = d.get("scope", {})
+            cat = cat.get("category", "") if isinstance(cat, dict) else ""
+            if scope not in cat:
+                continue
+        if doc_type:
+            if d.get("doc_type") != doc_type:
+                continue
+        docs_filtered.append(d)
+
+    # 收集所有 doc json 路径
+    doc_json_paths = {}
+    for d in docs_filtered:
+        paths = d.get("paths", {})
+        if isinstance(paths, dict) and paths.get("json"):
+            rel = paths["json"]
+            full = os.path.join(json_base, rel)
+            if os.path.exists(full):
+                doc_json_paths[full] = d
+
+    # Bigram 查询
+    q_bigrams = _text_to_bigrams(query)
+    if not q_bigrams:
+        return []
+
+    all_snippets = []
+    q_len = len(q_bigrams)
+
+    for json_path, doc_meta in doc_json_paths.items():
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                doc = json.load(f)
+        except Exception:
+            continue
+
+        doc_title = doc_meta.get("title", "")
+        issue_date = doc_meta.get("issue_date", "")
+        doc_scope = doc_meta.get("scope", {})
+        doc_scope = doc_scope.get("category", "") if isinstance(doc_scope, dict) else ""
+        doc_type_val = doc_meta.get("doc_type", "")
+        kids = doc.get("kids", [])
+
+        for kid in kids:
+            content = kid.get("content", "").strip()
+            if not content:
+                continue
+
+            tb = _text_to_bigrams(content)
+            intersection = q_bigrams & tb
+            if not intersection:
+                continue
+
+            relevance = len(intersection) / q_len
+
+            # 截取相关段落（保留上下文）
+            snippet = content[:max_chars] + ("…" if len(content) > max_chars else "")
+
+            all_snippets.append({
+                "doc_title": doc_title,
+                "issue_date": issue_date,
+                "scope": doc_scope,
+                "doc_type": doc_type_val,
+                "page_number": kid.get("page number"),
+                "snippet": snippet,
+                "relevance": round(relevance, 3),
+            })
+
+    # 排序
+    all_snippets.sort(key=lambda x: x["relevance"], reverse=True)
+    return all_snippets[:top_k]
+
+
+def query_guidance(query, top_k=5, scope=None, doc_type=None):
+    """
+    查询指导原则知识库（索引元数据级），返回最相关的文档。
+
+    【功能】
+    - 标题关键词精确匹配 + 模糊搜索
+    - 按相关度排序返回 top_k 条
+    - 支持分类和文档类型过滤
+
+    【参数】
+    - query: str         搜索关键词（如"生物等效性"）
+    - top_k: int         返回条数（默认5）
+    - scope: str         按分类过滤（如"化学药"、"中药"、"通用"）
+    - doc_type: str      按文档类型过滤（main/feedback/explanation/draft）
+
+    【返回】
+    list[dict]，每条包含: id, title, issue_date, status, scope, doc_type, tags, paths(json路径)
+
+    【调用示例】
+      results = query_guidance("生物等效性")
+      results = query_guidance("临床试验", top_k=3, scope="化学药")
+    """
+    import json, os, re
+
+    INDEX_FILE = os.environ.get("GUIDANCE_INDEX",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                     "Documents", "工作", "0 库", "法规指导原则规定知识库", "guidance_index.json"))
+    # 兼容本地 workspace 路径
+    if not os.path.exists(INDEX_FILE):
+        INDEX_FILE = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/guidance_index.json"
+
+    with open(INDEX_FILE, encoding="utf-8") as f:
+        idx = json.load(f)
+
+    docs = idx.get("documents", [])
+    q = query.strip().lower()
+
+    # 简单评分：标题完全包含query=3分，tags包含=2分，source_subdir包含=1分
+    scored = []
+    for d in docs:
+        # 过滤
+        if scope:
+            d_scope = d.get("scope", {})
+            cat = d_scope.get("category", "") if isinstance(d_scope, dict) else ""
+            if scope not in cat:
+                continue
+        if doc_type:
+            if d.get("doc_type") != doc_type:
+                continue
+
+        score = 0
+        title = d.get("title", "").lower()
+        tags = d.get("tags", [])
+        subdir = d.get("source_subdir", "").lower()
+
+        if q in title:
+            score += 3
+            # 标题开头匹配额外+1
+            if title.startswith(q):
+                score += 1
+        for tag in tags:
+            if q in str(tag).lower():
+                score += 2
+        if q in subdir:
+            score += 1
+
+        if score > 0:
+            paths = d.get("paths", {})
+            json_path = paths.get("json", "") if isinstance(paths, dict) else ""
+            scored.append({
+                "id": d.get("id"),
+                "title": d.get("title"),
+                "issue_date": d.get("issue_date"),
+                "status": d.get("status"),
+                "doc_type": d.get("doc_type"),
+                "scope": d.get("scope", {}).get("category") if isinstance(d.get("scope"), dict) else "",
+                "tags": d.get("tags", []),
+                "json_path": json_path,
+                "_score": score,
+            })
+
+    # 排序返回
+    scored.sort(key=lambda x: x["_score"], reverse=True)
+    for item in scored[:top_k]:
+        item.pop("_score", None)
+    return scored[:top_k]
