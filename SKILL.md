@@ -2,6 +2,7 @@ name: knowledge-base-manager
 version: 2.18.0
 version_date: 2026-05-07
 description: |
+  v2.19.0: 新增 semantic_graph_builder.py——基于30个监管概念词表从文档正文提取语义关系，生成226274条语义边并叠加到graph.json，语义边与结构边零重叠形成互补。
   v2.18.0: watchdog改为监控KB_ROOT根目录（recursive=True），通过_is_valid_raw_file+_get_watch_parent自动识别原始文件目录下新文件，无需hardcode目录列表；knowledge_base_manager.py ID逻辑升级；watchdog全目录监控修复；graphify增量重建作业已入队。
   v2.15.0: query_guidance() 查询接口支持所有 agent/skill 通用调用。
   v2.14.0: 标题相似度三级判断(identical/small/large)，解决大差异标题碰巧哈希相同的误判问题。
