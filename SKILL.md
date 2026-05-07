@@ -1,8 +1,8 @@
 name: knowledge-base-manager
-version: 2.16.0
-version_date: 2026-04-30
+version: 2.18.0
+version_date: 2026-05-07
 description: |
-  v2.16.0: 新增 search_guidance_fulltext() 正文检索——n-gram bigram 倒排索引，Python 原生实现无需外部引擎，1.3秒搜完355文档并返回相关段落摘要。
+  v2.18.0: watchdog改为监控KB_ROOT根目录（recursive=True），通过_is_valid_raw_file+_get_watch_parent自动识别原始文件目录下新文件，无需hardcode目录列表；knowledge_base_manager.py ID逻辑升级；watchdog全目录监控修复；graphify增量重建作业已入队。
   v2.15.0: query_guidance() 查询接口支持所有 agent/skill 通用调用。
   v2.14.0: 标题相似度三级判断(identical/small/large)，解决大差异标题碰巧哈希相同的误判问题。
   v2.13.0: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同日发布的不同文档碰巧封面相同导致的假误判。
@@ -15,6 +15,9 @@ description: |
   查询接口：
     - query_guidance(query, top_k, scope, doc_type) → 索引级元数据检索（标题/标签/分类）
     - search_guidance_fulltext(query, top_k, scope, doc_type) → 正文内容检索（返回相关段落+页码+相关度）
+  ★ 跨 Skill 调用约定：其他 agent/skill（如试验方案撰写）如需引用指导原则要求，
+    应在撰写前主动调用 query_guidance / search_guidance_fulltext 检索知识库，
+    不得跳过检索直接凭记忆撰写。
 
 # SKILL.md - 法规指导原则知识库管理器 (v2.12.0)
 

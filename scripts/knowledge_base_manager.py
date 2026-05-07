@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 2.16.0
+版本: 2.18.0
 功能: 法规指导原则知识库管理器（v2.14.0 新增: 标题相似度三级判断——identical/small/large；small差异常见于（试行）/（征求意见稿）等标注，去括号后相同视同 identical；large 差异即使哈希相同也判定为非重复。v2.13.0 新增: 内容哈希比对前增加标题过滤——不同标题直接跳过哈希比对，解决同一日期不同文件碰巧封面相同导致的假误判）
       v2.12.0 新增: graphify 钩子同步等待修复——轮询 session age 直到 agent 结束
       v2.11.0 新增: 同名不同日期不判定为重复; 源文件未更新则跳过重提取
@@ -361,8 +361,8 @@ def get_indexed_ids(index_data):
 
 # ---- 文件名解析 ----
 
-def parse_filename_for_meta(filename):
-    name = os.path.splitext(filename)[0]
+def parse_filename_for_meta(filename, subdir=None):
+    name = os.path.splitext(filename)[0]  # 去掉扩展名
     date_match = re.match(r"^(\d{8})", name)
     issue_date = date_match.group(1) if date_match else ""
     title_part = re.sub(r"^\d{8}\s*[-—]\s*", "", name)
@@ -394,7 +394,21 @@ def parse_filename_for_meta(filename):
     if not drug_types:
         drug_types = ["通用"]
     
-    doc_id = f"guidance_{category}_{issue_date}_{doc_type}" if issue_date else f"guidance_{category}_{doc_type}"
+    # ID 后缀生成：解决同子目录同日期文档的 ID 冲突
+    # 1. 清理标题：去掉复制后缀_N、括号及内容
+    # 2. 前12字符MD5前4位 + 全文MD5前4位
+    # 3. 文件名MD5前4位（处理同名不同内容的极端情况）
+    import hashlib
+    t = re.sub(r'\s*[-—]\s*', '', title_part)
+    t = re.sub(r'_\d+\$', '', t)
+    t = re.sub(r'[（(][^）)]*[）)].*', '', t)
+    short_hash = hashlib.md5(t[:12].encode('utf-8')).hexdigest()[:4]
+    full_hash = hashlib.md5(t.encode('utf-8')).hexdigest()[:4]
+    fname_clean = re.sub(r'\s+', ' ', filename)  # 把所有空白（含换行）替换为空格
+    fname_key = re.sub(r'^\d{8}\s*[-—]\s*|\.md$', '', fname_clean)
+    fname_hash = hashlib.md5(fname_key.encode('utf-8')).hexdigest()[:4]
+    sub_part = (f"_{subdir}" if subdir else "")
+    doc_id = f"guidance_{category}_{issue_date}_{doc_type}{sub_part}_{short_hash}{full_hash}_{fname_hash}" if issue_date else f"guidance_{category}_{doc_type}{sub_part}_{short_hash}{full_hash}_{fname_hash}"
     
     tags = []
     for kw in ["稳定性", "配伍", "注射剂", "原料药", "制剂", "化学药", "中药", "生物制品", "研究技术", "指导原则"]:
@@ -494,7 +508,7 @@ def rebuild_index_from_disk(kb_root, index_data):
                 index_data['documents'].append(entry)
                 existing_ids.add(meta['id'])
                 added.append(meta['title'])
-                print(f'  🔧 [磁盘恢复] {meta["title"]} [{cat}/{sub}]')
+                print(f'  🔧 [新增] {meta["title"]} [{cat}/{sub}]')
     return added
 
 # ---- 单文件处理 ----
@@ -748,11 +762,15 @@ def check_duplicate_by_hash(extracted_json, index_data, current_title=None, curr
 
 def process_new_file(f, index_data):
     log(f"处理文件: {f['name']}", "📄")
-    meta = parse_filename_for_meta(f['name'])
-    print(f"  自动分类: {meta['category']} | 状态: {meta['status']} | 类型: {meta['doc_type']}")
     
-    # 解析目标目录
-    cat_dir, guidance_subdir, rel_prefix = resolve_destination_dir(meta)
+    # 先解析目标目录（用于生成正确的文档 ID）
+    # 临时构造 meta 仅用于目录解析
+    _tmp_meta_for_dir = parse_filename_for_meta(f['name'])
+    cat_dir, guidance_subdir, rel_prefix = resolve_destination_dir(_tmp_meta_for_dir)
+    
+    # 用正确的 subdir 重新生成 meta（ID 中包含子目录，确保唯一性）
+    meta = parse_filename_for_meta(f['name'], subdir=guidance_subdir)
+    print(f"  自动分类: {meta['category']} | 子目录: {guidance_subdir} | 状态: {meta['status']} | 类型: {meta['doc_type']}")
     
     # 目标子目录路径（相对 KB_ROOT）
     raw_dir = os.path.join(rel_prefix, DIR_RAW)

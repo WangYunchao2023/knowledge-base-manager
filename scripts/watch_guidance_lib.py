@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-版本: 2.8.0
+版本: 2.10.0
 功能: 法规指导原则知识库 watchdog 监控进程
-      监控原始文件目录，自动触发 knowledge_base_manager.py 处理新文件
+      监控知识库根目录，自动触发 knowledge_base_manager.py 处理新文件
 
-用法:
-  python watch_guidance_lib.py              # 启动监控（前台）
-  python watch_guidance_lib.py --daemon    # 启动监控（后台守护进程）
-  python watch_guidance_lib.py --stop      # 停止守护进程
-
-监控目录:
-  /home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性/
-  （只监控此目录下的新 PDF/DOCX 文件）
+设计原则（v2.10.0）:
+  - 不硬编码目录列表，监控 KB_ROOT 根目录本身
+  - 自动感知所有新增的原始文件目录（不限于已知的分类）
+  - 通过文件扩展名过滤，只处理 .pdf/.doc/.docx
+  - 排除不需要监控的目录（graphify-out、供AI用信息、_images 等）
 
 触发流程:
-  检测到新文件 → 等待写入完成（防截断）→ 调用 knowledge_base_manager.py --trigger-hook graphify
+  检测到新文件 → 等待写入完成（防截断）→ 调用 knowledge_base_manager.py
 """
 
 import os
@@ -24,15 +21,42 @@ import subprocess
 import threading
 import logging
 import atexit
+import re
 from pathlib import Path
 
 # ============ 配置区 ============
-WATCH_DIR = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库/稳定性"
+KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
 KB_MANAGER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge_base_manager.py")
 PID_FILE = "/tmp/watch_guidance_lib.pid"
 LOG_FILE = "/tmp/watch_guidance_lib.log"
-# 写入完成后等待秒数（防文件截断）
 WRITE_COMPLETE_WAIT = 3
+
+# 不需要监控的目录名称（完全匹配）或前缀
+EXCLUDE_DIR_NAMES = {
+    "供AI用信息",     # 提取结果目录
+    "原始文件",       # 监控时只关心原始文件，但保留此名以便将来区分
+    "graphify-out",   # 图谱输出目录
+    "jobs",           # 作业队列目录
+    "参考模板",       # 参考模板目录
+    "内部文件",       # 内部文件目录
+    "_images",        # 图像缓存目录
+    "_table_pages_render",  # 表格渲染缓存
+}
+
+# 以这些结尾的目录名也排除（处理临时目录）
+EXCLUDE_DIR_ENDSWITH = ("_render", "_images", "_cache", "_temp")
+
+def _should_watch_dir(dirname):
+    """判断目录是否应该被监控（只监控原始文件归档目标）"""
+    # 完全匹配排除
+    if dirname in EXCLUDE_DIR_NAMES:
+        return False
+    # 后缀排除
+    for suffix in EXCLUDE_DIR_ENDSWITH:
+        if dirname.endswith(suffix):
+            return False
+    return True
+
 # ==============================
 
 logging.basicConfig(
@@ -45,17 +69,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("watch_guidance_lib")
 
+processing_lock = threading.Lock()
+processing_files = set()
+
 # ---- 文件写入完成检测 ----
 
 class FileWriteChecker:
-    """检测文件是否已写入完成（通过文件大小稳定）"""
     def __init__(self, path, timeout=30, interval=0.5):
         self.path = path
         self.timeout = timeout
         self.interval = interval
     
     def is_write_complete(self):
-        """文件大小连续两次不变则认为写完"""
         try:
             if not os.path.exists(self.path):
                 return False
@@ -67,7 +92,6 @@ class FileWriteChecker:
             return False
     
     def wait_for_complete(self):
-        """等待文件写入完成"""
         start = time.time()
         while time.time() - start < self.timeout:
             if self.is_write_complete():
@@ -81,27 +105,44 @@ class FileWriteChecker:
 
 SUPPORTED_EXTS = {".pdf", ".doc", ".docx"}
 
-# 全局锁，防止并发处理同一文件
-processing_lock = threading.Lock()
-processing_files = set()
+def _is_valid_raw_file(filepath):
+    """判断是否是需要处理的原始文件"""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in SUPPORTED_EXTS:
+        return False
+    # 跳过临时文件
+    if filepath.endswith(".tmp") or filepath.endswith(".crdownload"):
+        return False
+    return True
+
+def _get_watch_parent(filepath):
+    """获取 filepath 所属的"原始文件"目录层级，返回 None 表示不监控"""
+    # 原始文件的路径结构: KB_ROOT/分类/子目录/原始文件/文件名
+    # 我们只监控原始文件目录本身，而非其父目录
+    # 因此检测 filepath 是否在某个"原始文件"目录下
+    parts = filepath.split(os.sep)
+    try:
+        raw_idx = parts.index("原始文件")
+        # 返回原始文件目录的路径
+        return os.sep.join(parts[:raw_idx + 1])
+    except ValueError:
+        return None
 
 def on_file_created(event):
-    """新文件创建事件"""
     if event.is_directory:
         return
     
     filepath = event.src_path
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext not in SUPPORTED_EXTS:
+    if not _is_valid_raw_file(filepath):
         return
     
-    # 跳过临时文件
-    if filepath.endswith(".tmp") or filepath.endswith(".crdownload"):
+    parent_raw = _get_watch_parent(filepath)
+    if parent_raw is None:
+        # 文件不在原始文件目录下（如在供AI用信息/目录），跳过
         return
     
     log.info(f"检测到新文件: {filepath}")
     
-    # 检查是否已在处理中
     with processing_lock:
         if filepath in processing_files:
             log.info(f"文件正在处理中，跳过: {filepath}")
@@ -109,7 +150,6 @@ def on_file_created(event):
         processing_files.add(filepath)
     
     try:
-        # 等待写入完成
         checker = FileWriteChecker(filepath)
         if checker.wait_for_complete():
             log.info(f"文件写入完成，开始处理: {filepath}")
@@ -122,13 +162,15 @@ def on_file_created(event):
 
 
 def on_file_modified(event):
-    """文件修改事件（已存在的文件被更新）"""
     if event.is_directory:
         return
     
     filepath = event.src_path
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext not in SUPPORTED_EXTS:
+    if not _is_valid_raw_file(filepath):
+        return
+    
+    parent_raw = _get_watch_parent(filepath)
+    if parent_raw is None:
         return
     
     log.info(f"检测到文件更新: {filepath}")
@@ -151,7 +193,6 @@ def on_file_modified(event):
 
 
 def trigger_kb_manager(filepath):
-    """调用 knowledge_base_manager.py 处理文件"""
     try:
         log.info(f"调用知识库管理器: {filepath}")
         result = subprocess.run(
@@ -161,7 +202,6 @@ def trigger_kb_manager(filepath):
         if result.returncode == 0:
             log.info(f"知识库管理器处理成功: {filepath}")
             log.debug(result.stdout)
-            # graphify 作业已通过 knowledge_base_manager.py 自动入队
         else:
             log.error(f"知识库管理器处理失败: {result.stderr}")
     except subprocess.TimeoutExpired:
@@ -204,6 +244,7 @@ def daemon_stop():
     else:
         print("⚠️  未找到运行中的守护进程")
 
+
 # ---- 启动监控 ----
 
 def start_watching():
@@ -215,15 +256,18 @@ def start_watching():
     handler.on_modified = on_file_modified
     
     observer = Observer()
-    observer.schedule(handler, WATCH_DIR, recursive=True)
+    
+    # 监控 KB_ROOT 根目录（recursive=True）
+    # _get_watch_parent 在事件处理时过滤，只处理原始文件目录下的文件
+    observer.schedule(handler, KB_ROOT, recursive=True)
+    
     observer.start()
     
-    log.info(f"✅ 监控启动: {WATCH_DIR}")
+    log.info(f"✅ 监控启动: {KB_ROOT}（recursive=True，自动感知所有新增目录）")
     log.info(f"📋 PID: {os.getpid()}")
     log.info(f"📋 日志: {LOG_FILE}")
     log.info("按 Ctrl+C 停止")
     
-    # 注册退出清理
     atexit.register(lambda: observer.stop())
     
     try:
@@ -244,7 +288,6 @@ def start_daemon():
         sys.exit(0)
     elif pid == 0:
         os.setsid()
-        # 重定向标准输出/错误
         with open("/dev/null", "r") as devnull:
             os.dup2(devnull.fileno(), 0)
         with open(LOG_FILE, "a") as logf:
@@ -259,27 +302,18 @@ def start_daemon():
 # ---- 主入口 ----
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="法规指导原则知识库监控进程")
-    parser.add_argument("--daemon", action="store_true", help="后台守护进程模式")
-    parser.add_argument("--stop", action="store_true", help="停止守护进程")
-    args = parser.parse_args()
-    
-    if args.stop:
+    if "--stop" in sys.argv:
         daemon_stop()
         return
     
-    # 确保目录存在
-    os.makedirs(WATCH_DIR, exist_ok=True)
-    
-    if args.daemon:
+    if "--daemon" in sys.argv:
         start_daemon()
     else:
-        print(f"📦 法规指导原则知识库监控进程 v1.0.0")
-        print(f"监控目录: {WATCH_DIR}")
-        print(f"支持类型: PDF, DOC, DOCX")
-        print()
+        if not os.path.isdir(KB_ROOT):
+            print(f"⚠️  知识库目录不存在: {KB_ROOT}")
+            return
         start_watching()
+
 
 if __name__ == "__main__":
     main()

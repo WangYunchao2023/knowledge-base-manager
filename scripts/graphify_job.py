@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-版本: 2.8.0
+版本: 2.9.0
 功能: Graphify 作业处理器（供 cron isolated agent 调用）
       负责把作业状态打印出来，由 isolated agent 直接执行 graphify
 
@@ -43,6 +43,7 @@ def get_all_extracted_dirs():
 
 ALL_EXTRACTED_DIRS = get_all_extracted_dirs()
 GRAPHIFY_TARGET = ALL_EXTRACTED_DIRS[0] if ALL_EXTRACTED_DIRS else os.path.join(KB_ROOT, "稳定性", "供AI用信息")
+GRAPHIFY_OUTPUT = os.path.join(KB_ROOT, "graphify-out")
 JOB_QUEUE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jobs")
 JOB_MARKER = os.path.join(JOB_QUEUE_DIR, "pending_job.json")
 LOCK_FILE = os.path.join(JOB_QUEUE_DIR, "graphify.lock")
