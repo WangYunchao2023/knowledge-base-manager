@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-版本: 3.1.0
+版本: 3.2.0
 功能: llm_semantic_batch_processor - 完全独立的自循环批处理器（加固版）
       自己生成 trigger → 自己处理 → 自己更新 progress，不依赖任何外部进程
 
-架构（v3.1 加固）:
+架构（v3.2.0 VRAM协调）:
+  - VRAM调度接入：每个batch前后调用vram_switcher的mark_busy/mark_done
+    确保与KB_manager的qwen2.5vl互斥协调，不互相evict对方模型
   - 连续失败计数：连续失败3次停止盲目跳过，触发告警
   - Ollama 健康检查：每批前验证服务可用性
   - 写入验证：保存后读取确认文件完整性
   - 优雅退出：SIGTERM 收到后完成当前 batch 再退出
   - 看门狗：crontab 5分钟检查一次，进程死掉自动重启
   - 中断自检：启动时发现 last_run 超过 5 分钟则打印中断提示
+  - auto-release 5分钟超时：5分钟无新任务自动释放14B显存
 
 用法:
   python3 llm_semantic_batch_processor.py --daemon   # 后台守护进程
@@ -21,6 +24,10 @@
 import json, os, time, signal, subprocess, sys
 from pathlib import Path
 from datetime import datetime
+
+# VRAM 调度（必须先于任何模型调用）
+sys.path.insert(0, '/home/wangyc/.openclaw/scripts')
+from vram_switcher import VSwitcher
 
 # ============ 配置区 ============
 KB_ROOT = "/home/wangyc/Documents/工作/0 库/法规指导原则规定知识库"
@@ -41,6 +48,9 @@ LOG_MAX_LINES = 2000                    # 日志最大行数，超出截断
 running = True
 consecutive_fails = 0
 batches_since_health_check = 0
+
+# VRAM 调度器单例（daemon 生命周期内复用）
+_vram = VSwitcher()
 
 PROMPT_TEMPLATE = """## 任务：判断以下{n}对药品监管文档是否具有真实的监管语义关联
 
@@ -231,8 +241,12 @@ def process_one_batch():
     prompt = PROMPT_TEMPLATE.format(n=len(batch_edges), docs_info=docs_info, batch_lines=batch_lines)
     log_safe(f"处理 batch {batch_idx+1}/{total}，{len(batch_edges)} 对...", "📋")
 
-    # 调用 LLM
-    response, err = call_ollama(prompt)
+    # VRAM: 告诉调度器"我在用"，取消 auto-release 计时
+    _vram.mark_busy()
+    try:
+        response, err = call_ollama(prompt)
+    finally:
+        _vram.mark_done()  # 重置 auto-release 计时
     if err:
         consecutive_fails += 1
         log_safe(f"❌ LLM 调用失败 ({consecutive_fails}/{MAX_CONSECUTIVE_FAILS}): {err}", "❌")
@@ -279,7 +293,7 @@ def process_one_batch():
     if os.path.exists(OUTPUT_FILE):
         data = json.load(open(OUTPUT_FILE))
     else:
-        data = {"version": "3.1.0", "generated_at": datetime.now().isoformat(),
+        data = {"version": "3.2.0", "generated_at": datetime.now().isoformat(),
                 "model": OLLAMA_MODEL, "edges": [], "total_edges": 0,
                 "related_count": 0, "not_related_count": 0, "batches_completed": 0}
 
@@ -342,9 +356,13 @@ def daemon():
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
-    log_safe(f"🚀 启动自循环批处理器 v3.1（{OLLAMA_MODEL}，每 {POLL_INTERVAL}s）", "🚀")
+    log_safe(f"🚀 启动自循环批处理器 v3.2（{OLLAMA_MODEL}，每 {POLL_INTERVAL}s）", "🚀")
     total = len(load_batches())
     log_safe(f"总批次: {total}，已完成: {load_progress().get('completed_batches', 0)}", "📊")
+
+    # 启动时加载模型到 VRAM（确保 14B 常驻）
+    _vram.load(OLLAMA_MODEL)
+
 
     # 启动时健康检查
     ok, msg = check_ollama_health()

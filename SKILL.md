@@ -1,5 +1,5 @@
 name: knowledge-base-manager
-version: 2.21.0
+version: 2.22.0
 version_date: 2026-05-12
 description: |
   v2.21.0: LLM语义图谱构建重构——新增 llm_semantic_batch_processor.py(v3.1)作为独立守护进程，直接curl Ollama不依赖sessions_spawn，含中断自检、连续失败熔断、Ollama健康检查、写入验证、优雅退出；删除旧cron_driver/daemon/loop；清理临时文件。
